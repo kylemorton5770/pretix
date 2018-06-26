@@ -711,6 +711,128 @@ class AbstractPosition(models.Model):
                 else self.variation.quotas.filter(subevent=self.subevent))
 
 
+class OrderPayment(models.Model):
+    PAYMENT_STATE_PREPARED = 'prepared'
+    PAYMENT_STATE_PENDING = 'pending'
+    PAYMENT_STATE_CONFIRMED = 'confirmed'
+    PAYMENT_STATE_FAILED = 'failed'
+    PAYMENT_STATE_REFUNDED = 'refunded'
+
+    PAYMENT_STATES = (
+        (PAYMENT_STATE_PREPARED, pgettext_lazy('payment_state', 'prepared')),
+        (PAYMENT_STATE_PENDING, pgettext_lazy('payment_state', 'pending')),
+        (PAYMENT_STATE_CONFIRMED, pgettext_lazy('payment_state', 'confirmed')),
+        (PAYMENT_STATE_FAILED, pgettext_lazy('payment_state', 'failed')),
+        (PAYMENT_STATE_REFUNDED, pgettext_lazy('payment_state', 'refunded')),
+    )
+    state = models.CharField(
+        max_length=190, choices=PAYMENT_STATES
+    )
+    amount = models.DecimalField(
+        decimal_places=2, max_digits=10,
+        verbose_name=_("Amount")
+    )
+    order = models.ForeignKey(
+        Order,
+        verbose_name=_("Order"),
+        related_name='payments',
+        on_delete=models.PROTECT
+    )
+    created = models.DateTimeField(
+        auto_now_add=True
+    )
+    payment_date = models.DateTimeField(
+        null=True, blank=True
+    )
+    provider = models.CharField(
+        null=True, blank=True,
+        max_length=255,
+        verbose_name=_("Payment provider")
+    )
+    info = models.TextField(
+        verbose_name=_("Payment information"),
+        null=True, blank=True
+    )
+
+    @property
+    def info_data(self):
+        return json.loads(self.info)
+
+    @info_data.setter
+    def info_data(self, d):
+        self.info = json.dumps(d)
+
+
+class OrderRefund(models.Model):
+    REFUND_STATE_REQUESTED = 'requested'
+    REFUND_STATE_APPROVED = 'approved'
+    REFUND_STATE_EXTERNAL = 'external'
+    REFUND_STATE_TRANSIT = 'transit'
+    REFUND_STATE_DONE = 'done'
+    REFUND_STATE_REJECTED = 'rejected'
+    REFUND_STATE_CANCELED = 'canceled'
+
+    REFUND_STATES = (
+        (REFUND_STATE_REQUESTED, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_APPROVED, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_EXTERNAL, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_TRANSIT, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_DONE, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_REJECTED, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_CANCELED, pgettext_lazy('refund_state', 'requested')),
+    )
+
+    REFUND_SOURCE_BUYER = 'buyer'
+    REFUND_SOURCE_ADMIN = 'admin'
+    REFUND_SOURCE_EXTERNAL = 'external'
+
+    REFUND_SOURCES = (
+        (REFUND_SOURCE_ADMIN, pgettext_lazy('refund_source', 'Organizer')),
+        (REFUND_SOURCE_BUYER, pgettext_lazy('refund_source', 'Customer')),
+        (REFUND_SOURCE_EXTERNAL, pgettext_lazy('refund_source', 'External')),
+    )
+
+    state = models.CharField(
+        max_length=190, choices=REFUND_STATES
+    )
+    source = models.CharField(
+        max_length=190, choices=REFUND_SOURCES
+    )
+    amount = models.DecimalField(
+        decimal_places=2, max_digits=10,
+        verbose_name=_("Amount")
+    )
+    order = models.ForeignKey(
+        Order,
+        verbose_name=_("Order"),
+        related_name='refunds',
+        on_delete=models.PROTECT
+    )
+    created = models.DateTimeField(
+        auto_now_add=True
+    )
+    execution_date = models.DateTimeField(
+        null=True, blank=True
+    )
+    provider = models.CharField(
+        null=True, blank=True,
+        max_length=255,
+        verbose_name=_("Payment provider")
+    )
+    info = models.TextField(
+        verbose_name=_("Payment information"),
+        null=True, blank=True
+    )
+
+    @property
+    def info_data(self):
+        return json.loads(self.info)
+
+    @info_data.setter
+    def info_data(self, d):
+        self.info = json.dumps(d)
+
+
 class OrderFee(models.Model):
     """
     An OrderFee objet represents a fee that is added to the order total independently of
