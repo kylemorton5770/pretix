@@ -21,8 +21,8 @@ from pretix.base.i18n import (
     LazyCurrencyNumber, LazyDate, LazyLocaleException, LazyNumber, language,
 )
 from pretix.base.models import (
-    CartPosition, Event, Item, ItemVariation, Order, OrderPosition, Quota,
-    User, Voucher,
+    CartPosition, Event, Item, ItemVariation, Order, OrderPayment,
+    OrderPosition, Quota, User, Voucher,
 )
 from pretix.base.models.event import SubEvent
 from pretix.base.models.orders import (
@@ -40,8 +40,7 @@ from pretix.base.services.locking import LockTimeoutException
 from pretix.base.services.mail import SendMailException
 from pretix.base.services.pricing import get_price
 from pretix.base.signals import (
-    allow_ticket_download, order_fee_calculation, order_paid, order_placed,
-    periodic_task,
+    allow_ticket_download, order_fee_calculation, order_placed, periodic_task,
 )
 from pretix.celery_app import app
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -79,99 +78,8 @@ error_messages = {
 logger = logging.getLogger(__name__)
 
 
-def mark_order_paid(order: Order, provider: str=None, info: str=None, date: datetime=None, manual: bool=None,
-                    force: bool=False, send_mail: bool=True, user: User=None, mail_text='',
-                    count_waitinglist=True, auth=None) -> Order:
-    """
-    Marks an order as paid. This sets the payment provider, info and date and returns
-    the order object.
-
-    :param provider: The payment provider that marked this as paid
-    :type provider: str
-    :param info: The information to store in order.payment_info
-    :type info: str
-    :param date: The date the payment was received (if you pass ``None``, the current
-                 time will be used).
-    :type date: datetime
-    :param force: Whether this payment should be marked as paid even if no remaining
-                  quota is available (default: ``False``).
-    :type force: boolean
-    :param send_mail: Whether an email should be sent to the user about this event (default: ``True``).
-    :type send_mail: boolean
-    :param user: The user that performed the change
-    :param mail_text: Additional text to be included in the email
-    :type mail_text: str
-    :raises Quota.QuotaExceededException: if the quota is exceeded and ``force`` is ``False``
-    """
-    if order.status == Order.STATUS_PAID:
-        return order
-
-    with order.event.lock() as now_dt:
-        can_be_paid = order._can_be_paid(count_waitinglist=count_waitinglist)
-        if not force and can_be_paid is not True:
-            raise Quota.QuotaExceededException(can_be_paid)
-        order.payment_provider = provider or order.payment_provider
-        order.payment_info = info or order.payment_info
-        order.payment_date = date or now_dt
-        if manual is not None:
-            order.payment_manual = manual
-        order.status = Order.STATUS_PAID
-        order.save()
-
-    order.log_action('pretix.event.order.paid', {
-        'provider': provider,
-        'info': info,
-        'date': date or now_dt,
-        'manual': manual,
-        'force': force
-    }, user=user, auth=auth)
-    order_paid.send(order.event, order=order)
-
-    invoice = None
-    if invoice_qualified(order):
-        invoices = order.invoices.filter(is_cancellation=False).count()
-        cancellations = order.invoices.filter(is_cancellation=True).count()
-        gen_invoice = (
-            (invoices == 0 and order.event.settings.get('invoice_generate') in ('True', 'paid')) or
-            0 < invoices <= cancellations
-        )
-        if gen_invoice:
-            invoice = generate_invoice(
-                order,
-                trigger_pdf=not send_mail or not order.event.settings.invoice_email_attachment
-            )
-
-    if send_mail:
-        with language(order.locale):
-            try:
-                invoice_name = order.invoice_address.name
-                invoice_company = order.invoice_address.company
-            except InvoiceAddress.DoesNotExist:
-                invoice_name = ""
-                invoice_company = ""
-            email_template = order.event.settings.mail_text_order_paid
-            email_context = {
-                'event': order.event.name,
-                'url': build_absolute_uri(order.event, 'presale:event.order', kwargs={
-                    'order': order.code,
-                    'secret': order.secret
-                }),
-                'downloads': order.event.settings.get('ticket_download', as_type=bool),
-                'invoice_name': invoice_name,
-                'invoice_company': invoice_company,
-                'payment_info': mail_text
-            }
-            email_subject = _('Payment received for your order: %(code)s') % {'code': order.code}
-            try:
-                order.send_mail(
-                    email_subject, email_template, email_context,
-                    'pretix.event.order.email.order_paid', user,
-                    invoices=[invoice] if invoice and order.event.settings.invoice_email_attachment else []
-                )
-            except SendMailException:
-                logger.exception('Order paid email could not be sent')
-
-    return order
+def mark_order_paid(*args, **kwargs):
+    raise NotImplementedError("This method is no longer supported since pretix 1.17.")
 
 
 def extend_order(order: Order, new_date: datetime, force: bool=False, user: User=None, auth=None):
@@ -458,11 +366,16 @@ def _create_order(event: Event, email: str, positions: List[CartPosition], now_d
             datetime=now_dt,
             locale=locale,
             total=total,
-            payment_provider=payment_provider.identifier,
             meta_info=json.dumps(meta_info or {}),
         )
         order.set_expires(now_dt, event.subevents.filter(id__in=[p.subevent_id for p in positions]))
         order.save()
+
+        order.payments.create(
+            state=OrderPayment.PAYMENT_STATE_CREATED,
+            provider=payment_provider,
+            amount=total,
+        )
 
         if address:
             if address.order is not None:

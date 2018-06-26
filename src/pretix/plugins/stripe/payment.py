@@ -9,6 +9,7 @@ from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.core import signing
+from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.crypto import get_random_string
@@ -16,10 +17,12 @@ from django.utils.http import urlquote
 from django.utils.translation import pgettext, ugettext, ugettext_lazy as _
 
 from pretix import __version__
-from pretix.base.models import Event, Order, Quota, RequiredAction
+from pretix.base.models import (
+    Event, Order, OrderPayment, Quota, RequiredAction,
+)
 from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.services.mail import SendMailException
-from pretix.base.services.orders import mark_order_paid, mark_order_refunded
+from pretix.base.services.orders import mark_order_refunded
 from pretix.base.settings import SettingsSandbox
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -233,12 +236,12 @@ class StripeMethod(BasePaymentProvider):
         return self.settings.get('_enabled', as_type=bool) and self.settings.get('method_{}'.format(self.method),
                                                                                  as_type=bool)
 
-    def order_prepare(self, request, order):
+    def payment_prepare(self, request, payment):
         return self.checkout_prepare(request, None)
 
-    def _get_amount(self, order):
+    def _get_amount(self, payment):
         places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
-        return int(order.total * 10 ** places)
+        return int(payment.amount * 10 ** places)
 
     @property
     def api_kwargs(self):
@@ -271,26 +274,26 @@ class StripeMethod(BasePaymentProvider):
     def order_can_retry(self, order):
         return self._is_still_available(order=order)
 
-    def _charge_source(self, request, source, order):
+    def _charge_source(self, request, source, payment):
         try:
             params = {}
             if not source.startswith('src_'):
                 params['statement_descriptor'] = ugettext('{event}-{code}').format(
                     event=self.event.slug.upper(),
-                    code=order.code
+                    code=payment.order.code
                 )[:22]
             params.update(self.api_kwargs)
             charge = stripe.Charge.create(
-                amount=self._get_amount(order),
+                amount=self._get_amount(payment),
                 currency=self.event.currency.lower(),
                 source=source,
                 metadata={
-                    'order': str(order.id),
+                    'order': str(payment.order.id),
                     'event': self.event.id,
-                    'code': order.code
+                    'code': payment.order.code
                 },
                 # TODO: Is this sufficient?
-                idempotency_key=str(self.event.id) + order.code + source,
+                idempotency_key=str(self.event.id) + payment.order.code + source,
                 **params
             )
         except stripe.error.CardError as e:
@@ -301,11 +304,12 @@ class StripeMethod(BasePaymentProvider):
                 err = {'message': str(e)}
                 logger.exception('Stripe error: %s' % str(e))
             logger.info('Stripe card error: %s' % str(err))
-            order.payment_info = json.dumps({
+            payment.info_data = {
                 'error': True,
                 'message': err['message'],
-            })
-            order.save(update_fields=['payment_info'])
+            }
+            payment.state = OrderPayment.PAYMENT_STATE_FAILED
+            payment.save()
             raise PaymentException(_('Stripe reported an error with your card: %s') % err['message'])
 
         except stripe.error.StripeError as e:
@@ -315,22 +319,25 @@ class StripeMethod(BasePaymentProvider):
             else:
                 err = {'message': str(e)}
                 logger.exception('Stripe error: %s' % str(e))
-            order.payment_info = json.dumps({
+            payment.info_data = {
                 'error': True,
                 'message': err['message'],
-            })
-            order.save(update_fields=['payment_info'])
+            }
+            payment.state = OrderPayment.PAYMENT_STATE_FAILED
+            payment.save()
             raise PaymentException(_('We had trouble communicating with Stripe. Please try again and get in touch '
                                      'with us if this problem persists.'))
         else:
-            ReferencedStripeObject.objects.get_or_create(order=order, reference=charge.id)
+            ReferencedStripeObject.objects.get_or_create(order=payment.order, reference=charge.id,
+                                                         payment=payment)
             if charge.status == 'succeeded' and charge.paid:
                 try:
-                    mark_order_paid(order, self.identifier, str(charge))
+                    payment.info = str(charge)
+                    payment.confirm()
                 except Quota.QuotaExceededException as e:
                     RequiredAction.objects.create(
                         event=self.event, action_type='pretix.plugins.stripe.overpaid', data=json.dumps({
-                            'order': order.code,
+                            'order': payment.order.code,
                             'charge': charge.id
                         })
                     )
@@ -342,13 +349,15 @@ class StripeMethod(BasePaymentProvider):
                 if request:
                     messages.warning(request, _('Your payment is pending completion. We will inform you as soon as the '
                                                 'payment completed.'))
-                order.payment_info = str(charge)
-                order.save(update_fields=['payment_info'])
+                payment.info = str(charge)
+                payment.state = OrderPayment.PAYMENT_STATE_PENDING
+                payment.save()
                 return
             else:
                 logger.info('Charge failed: %s' % str(charge))
-                order.payment_info = str(charge)
-                order.save(update_fields=['payment_info'])
+                payment.info = str(charge)
+                payment.state = OrderPayment.PAYMENT_STATE_FAILED
+                payment.save()
                 raise PaymentException(_('Stripe reported an error: %s') % charge.failure_message)
 
     def order_pending_render(self, request, order) -> str:
@@ -445,10 +454,10 @@ class StripeMethod(BasePaymentProvider):
             order.payment_info = str(ch)
             order.save()
 
-    def payment_perform(self, request, order) -> str:
+    def execute_payment(self, request: HttpRequest, payment: OrderPayment):
         self._init_api()
         try:
-            source = self._create_source(request, order)
+            source = self._create_source(request, payment)
         except stripe.error.StripeError as e:
             if e.json_body:
                 err = e.json_body['error']
@@ -456,18 +465,21 @@ class StripeMethod(BasePaymentProvider):
             else:
                 err = {'message': str(e)}
                 logger.exception('Stripe error: %s' % str(e))
-            order.payment_info = json.dumps({
+            payment.info_data = {
                 'error': True,
                 'message': err['message'],
-            })
-            order.save(update_fields=['payment_info'])
+            }
+            payment.state = OrderPayment.PAYMENT_STATE_FAILED
+            payment.save()
             raise PaymentException(_('We had trouble communicating with Stripe. Please try again and get in touch '
                                      'with us if this problem persists.'))
 
-        ReferencedStripeObject.objects.get_or_create(order=order, reference=source.id)
-        order.payment_info = str(source)
-        order.save(update_fields=['payment_info'])
-        request.session['payment_stripe_order_secret'] = order.secret
+        ReferencedStripeObject.objects.get_or_create(order=payment.order, reference=source.id,
+                                                     payment=payment)
+        payment.info = str(source)
+        payment.state = OrderPayment.PAYMENT_STATE_PENDING
+        payment.save()
+        request.session['payment_stripe_order_secret'] = payment.order.secret
         return self.redirect(request, source.redirect.url)
 
     def redirect(self, request, url):
@@ -549,41 +561,43 @@ class StripeCC(StripeMethod):
         else:
             return card.three_d_secure == 'required'
 
-    def payment_perform(self, request, order) -> str:
+    def execute_payment(self, request: HttpRequest, payment: OrderPayment):
         self._init_api()
 
         if request.session['payment_stripe_token'].startswith('src_'):
             try:
                 src = stripe.Source.retrieve(request.session['payment_stripe_token'], **self.api_kwargs)
                 if src.type == 'card' and src.card and self._use_3ds(src.card):
-                    request.session['payment_stripe_order_secret'] = order.secret
+                    request.session['payment_stripe_order_secret'] = payment.order.secret
                     source = stripe.Source.create(
                         type='three_d_secure',
-                        amount=self._get_amount(order),
+                        amount=self._get_amount(payment),
                         currency=self.event.currency.lower(),
                         three_d_secure={
                             'card': src.id
                         },
                         statement_descriptor=ugettext('{event}-{code}').format(
                             event=self.event.slug.upper(),
-                            code=order.code
+                            code=payment.order.code
                         )[:22],
                         metadata={
-                            'order': str(order.id),
+                            'order': str(payment.order.id),
                             'event': self.event.id,
-                            'code': order.code
+                            'code': payment.order.code
                         },
                         redirect={
                             'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                                'order': order.code,
-                                'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                                'order': payment.order.code,
+                                'payment': payment.pk,
+                                'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                             })
                         },
                         **self.api_kwargs
                     )
                     if source.status == "pending":
-                        order.payment_info = str(source)
-                        order.save(update_fields=['payment_info'])
+                        payment.info = str(source)
+                        payment.state = OrderPayment.PAYMENT_STATE_PENDING
+                        payment.save()
                         return self.redirect(request, source.redirect.url)
             except stripe.error.StripeError as e:
                 if e.json_body:
@@ -592,16 +606,17 @@ class StripeCC(StripeMethod):
                 else:
                     err = {'message': str(e)}
                     logger.exception('Stripe error: %s' % str(e))
-                order.payment_info = json.dumps({
+                payment.info_data = {
                     'error': True,
                     'message': err['message'],
-                })
-                order.save(update_fields=['payment_info'])
+                }
+                payment.state = OrderPayment.PAYMENT_STATE_FAILED
+                payment.save()
                 raise PaymentException(_('We had trouble communicating with Stripe. Please try again and get in touch '
                                          'with us if this problem persists.'))
 
         try:
-            self._charge_source(request, request.session['payment_stripe_token'], order)
+            self._charge_source(request, request.session['payment_stripe_token'], payment)
         finally:
             del request.session['payment_stripe_token']
 
@@ -628,16 +643,16 @@ class StripeGiropay(StripeMethod):
             ('account', forms.CharField(label=_('Account holder'))),
         ])
 
-    def _create_source(self, request, order):
+    def _create_source(self, request, payment):
         try:
             source = stripe.Source.create(
                 type='giropay',
-                amount=self._get_amount(order),
+                amount=self._get_amount(payment),
                 currency=self.event.currency.lower(),
                 metadata={
-                    'order': str(order.id),
+                    'order': str(payment.order.id),
                     'event': self.event.id,
-                    'code': order.code
+                    'code': payment.order.code
                 },
                 owner={
                     'name': request.session.get('payment_stripe_giropay_account') or ugettext('unknown name')
@@ -645,13 +660,14 @@ class StripeGiropay(StripeMethod):
                 giropay={
                     'statement_descriptor': ugettext('{event}-{code}').format(
                         event=self.event.slug.upper(),
-                        code=order.code
+                        code=payment.order.code
                     )[:35]
                 },
                 redirect={
                     'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                        'order': order.code,
-                        'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                        'order': payment.order.code,
+                        'payment': payment.pk,
+                        'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                     })
                 },
                 **self.api_kwargs
@@ -689,26 +705,27 @@ class StripeIdeal(StripeMethod):
         }
         return template.render(ctx)
 
-    def _create_source(self, request, order):
+    def _create_source(self, request, payment):
         source = stripe.Source.create(
             type='ideal',
-            amount=self._get_amount(order),
+            amount=self._get_amount(payment),
             currency=self.event.currency.lower(),
             metadata={
-                'order': str(order.id),
+                'order': str(payment.order.id),
                 'event': self.event.id,
-                'code': order.code
+                'code': payment.order.code
             },
             ideal={
                 'statement_descriptor': ugettext('{event}-{code}').format(
                     event=self.event.slug.upper(),
-                    code=order.code
+                    code=payment.order.code
                 )[:22]
             },
             redirect={
                 'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                    'order': order.code,
-                    'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                    'order': payment.order.code,
+                    'payment': payment.pk,
+                    'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                 })
             },
             **self.api_kwargs
@@ -737,20 +754,21 @@ class StripeAlipay(StripeMethod):
         }
         return template.render(ctx)
 
-    def _create_source(self, request, order):
+    def _create_source(self, request, payment):
         source = stripe.Source.create(
             type='alipay',
-            amount=self._get_amount(order),
+            amount=self._get_amount(payment),
             currency=self.event.currency.lower(),
             metadata={
-                'order': str(order.id),
+                'order': str(payment.order.id),
                 'event': self.event.id,
-                'code': order.code
+                'code': payment.order.code
             },
             redirect={
                 'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                    'order': order.code,
-                    'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                    'order': payment.order.code,
+                    'payment': payment.pk,
+                    'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                 })
             },
             **self.api_kwargs
@@ -786,16 +804,16 @@ class StripeBancontact(StripeMethod):
             ('account', forms.CharField(label=_('Account holder'), min_length=3)),
         ])
 
-    def _create_source(self, request, order):
+    def _create_source(self, request, payment):
         try:
             source = stripe.Source.create(
                 type='bancontact',
-                amount=self._get_amount(order),
+                amount=self._get_amount(payment),
                 currency=self.event.currency.lower(),
                 metadata={
-                    'order': str(order.id),
+                    'order': str(payment.order.id),
                     'event': self.event.id,
-                    'code': order.code
+                    'code': payment.order.code
                 },
                 owner={
                     'name': request.session.get('payment_stripe_bancontact_account') or ugettext('unknown name')
@@ -803,13 +821,14 @@ class StripeBancontact(StripeMethod):
                 bancontact={
                     'statement_descriptor': ugettext('{event}-{code}').format(
                         event=self.event.slug.upper(),
-                        code=order.code
+                        code=payment.order.code
                     )[:35]
                 },
                 redirect={
                     'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                        'order': order.code,
-                        'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                        'order': payment.order.code,
+                        'payment': payment.pk,
+                        'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                     })
                 },
                 **self.api_kwargs
@@ -860,27 +879,28 @@ class StripeSofort(StripeMethod):
             ))),
         ])
 
-    def _create_source(self, request, order):
+    def _create_source(self, request, payment):
         source = stripe.Source.create(
             type='sofort',
-            amount=self._get_amount(order),
+            amount=self._get_amount(payment),
             currency=self.event.currency.lower(),
             metadata={
-                'order': str(order.id),
+                'order': str(payment.order.id),
                 'event': self.event.id,
-                'code': order.code
+                'code': payment.order.code
             },
             sofort={
                 'country': request.session.get('payment_stripe_sofort_bank_country'),
                 'statement_descriptor': ugettext('{event}-{code}').format(
                     event=self.event.slug.upper(),
-                    code=order.code
+                    code=payment.order.code
                 )[:35]
             },
             redirect={
                 'return_url': build_absolute_uri(self.event, 'plugins:stripe:return', kwargs={
-                    'order': order.code,
-                    'hash': hashlib.sha1(order.secret.lower().encode()).hexdigest(),
+                    'order': payment.order.code,
+                    'payment': payment.pk,
+                    'hash': hashlib.sha1(payment.order.secret.lower().encode()).hexdigest(),
                 })
             },
             **self.api_kwargs

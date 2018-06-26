@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import os
 import string
 from datetime import datetime, time, timedelta
@@ -30,6 +31,8 @@ from pretix.base.reldate import RelativeDateWrapper
 from .base import LoggedModel
 from .event import Event, SubEvent
 from .items import Item, ItemVariation, Question, QuestionOption, Quota
+
+logger = logging.getLogger(__name__)
 
 
 def generate_secret():
@@ -198,6 +201,16 @@ class Order(LoggedModel):
             return json.loads(self.meta_info)
         except TypeError:
             return None
+
+    @property
+    def pending_sum(self):
+        payment_sum = self.order.payments.filter(
+            state=self.PAYMENT_STATE_CONFIRMED
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        refund_sum = self.order.refunds.filter(
+            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        return self.total - payment_sum + refund_sum
 
     @property
     def full_code(self):
@@ -712,16 +725,38 @@ class AbstractPosition(models.Model):
 
 
 class OrderPayment(models.Model):
-    PAYMENT_STATE_PREPARED = 'prepared'
+    """
+    Represents a payment or payment attempt for an order.
+
+
+    :param state: The state of the payment, one of ``created``, ``pending``, ``confirmed``, ``failed``,
+      ``canceled``, or ``refunded``.
+    :type state: str
+    :param amount: The payment amount
+    :type amount: Decimal
+    :param order: The order that is paid
+    :type order: Order
+    :param created: The creation time of this record
+    :type created: datetime
+    :param payment_date: The completion time of this payment
+    :type payment_date: datetime
+    :param provider: The payment provider in use
+    :type provider: str
+    :param info_data: Provider-specific meta information
+    :type info_data: dict
+    """
+    PAYMENT_STATE_CREATED = 'created'
     PAYMENT_STATE_PENDING = 'pending'
     PAYMENT_STATE_CONFIRMED = 'confirmed'
     PAYMENT_STATE_FAILED = 'failed'
+    PAYMENT_STATE_CANCELED = 'canceled'
     PAYMENT_STATE_REFUNDED = 'refunded'
 
     PAYMENT_STATES = (
-        (PAYMENT_STATE_PREPARED, pgettext_lazy('payment_state', 'prepared')),
+        (PAYMENT_STATE_CREATED, pgettext_lazy('payment_state', 'created')),
         (PAYMENT_STATE_PENDING, pgettext_lazy('payment_state', 'pending')),
         (PAYMENT_STATE_CONFIRMED, pgettext_lazy('payment_state', 'confirmed')),
+        (PAYMENT_STATE_CANCELED, pgettext_lazy('payment_state', 'canceled')),
         (PAYMENT_STATE_FAILED, pgettext_lazy('payment_state', 'failed')),
         (PAYMENT_STATE_REFUNDED, pgettext_lazy('payment_state', 'refunded')),
     )
@@ -754,6 +789,9 @@ class OrderPayment(models.Model):
         null=True, blank=True
     )
 
+    class Meta:
+        ordering = ('created',)
+
     @property
     def info_data(self):
         return json.loads(self.info)
@@ -762,8 +800,128 @@ class OrderPayment(models.Model):
     def info_data(self, d):
         self.info = json.dumps(d)
 
+    @cached_property
+    def payment_provider(self):
+        return self.order.event.get_payment_providers().get(self.provider)
+
+    def confirm(self, count_waitinglist=True, send_mail=True, force=False, user=None, auth=None, mail_text=''):
+        """
+        Marks the payment as complete. If applicable and possible, this also marks the order as paid.
+
+        :param force: Whether this payment should be marked as paid even if no remaining
+                      quota is available (default: ``False``).
+        :type force: boolean
+        :param send_mail: Whether an email should be sent to the user about this event (default: ``True``).
+        :type send_mail: boolean
+        :param user: The user that performed the change
+        :param mail_text: Additional text to be included in the email
+        :type mail_text: str
+        :raises Quota.QuotaExceededException: if the quota is exceeded and ``force`` is ``False``
+        """
+        from pretix.base.signals import order_paid
+        from pretix.base.services.invoices import generate_invoice, invoice_qualified
+        from pretix.base.services.mail import SendMailException
+        from pretix.multidomain.urlreverse import build_absolute_uri
+
+        self.state = self.PAYMENT_STATE_CONFIRMED
+        self.payment_date = now()
+        self.save()
+
+        if self.order.status == Order.STATUS_PAID:
+            # TODO: overpay detection?
+            return
+
+        payment_sum = self.order.payments.filter(
+            state=self.PAYMENT_STATE_CONFIRMED
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        refund_sum = self.order.refunds.filter(
+            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+        if payment_sum - refund_sum < self.order.total:
+            return
+
+        with self.order.event.lock():
+            can_be_paid = self.order._can_be_paid(count_waitinglist=count_waitinglist)
+            if not force and can_be_paid is not True:
+                raise Quota.QuotaExceededException(can_be_paid)
+            self.order.status = Order.STATUS_PAID
+            self.order.save()
+
+            self.order.log_action('pretix.event.order.paid', {
+                'provider': self.provider,
+                'info': self.info,
+                'date': self.payment_date,
+                'force': force
+            }, user=user, auth=auth)
+            order_paid.send(self.order.event, order=self.order)
+
+        invoice = None
+        if invoice_qualified(self.order):
+            invoices = self.order.invoices.filter(is_cancellation=False).count()
+            cancellations = self.order.invoices.filter(is_cancellation=True).count()
+            gen_invoice = (
+                (invoices == 0 and self.order.event.settings.get('invoice_generate') in ('True', 'paid')) or
+                0 < invoices <= cancellations
+            )
+            if gen_invoice:
+                invoice = generate_invoice(
+                    self.order,
+                    trigger_pdf=not send_mail or not self.order.event.settings.invoice_email_attachment
+                )
+
+        if send_mail:
+            with language(self.order.locale):
+                try:
+                    invoice_name = self.order.invoice_address.name
+                    invoice_company = self.order.invoice_address.company
+                except InvoiceAddress.DoesNotExist:
+                    invoice_name = ""
+                    invoice_company = ""
+                email_template = self.order.event.settings.mail_text_order_paid
+                email_context = {
+                    'event': self.order.event.name,
+                    'url': build_absolute_uri(self.order.event, 'presale:event.order', kwargs={
+                        'order': self.order.code,
+                        'secret': self.order.secret
+                    }),
+                    'downloads': self.order.event.settings.get('ticket_download', as_type=bool),
+                    'invoice_name': invoice_name,
+                    'invoice_company': invoice_company,
+                    'payment_info': mail_text
+                }
+                email_subject = _('Payment received for your order: %(code)s') % {'code': self.order.code}
+                try:
+                    self.order.send_mail(
+                        email_subject, email_template, email_context,
+                        'pretix.event.order.email.order_paid', user,
+                        invoices=[invoice] if invoice and self.order.event.settings.invoice_email_attachment else []
+                    )
+                except SendMailException:
+                    logger.exception('Order paid email could not be sent')
+
 
 class OrderRefund(models.Model):
+    """
+    Represents a refund or refund attempt for an order.
+
+
+    :param state: The state of the payment, one of ``requested``, ``approved``, ``external``, ``transit``,
+      ``done``, ``rejected``, or ``canceled``.
+    :type state: str
+    :param source: How this was created, one of ``buyer``, ``admin``, or ``external``.
+    :param amount: The payment amount
+    :type amount: Decimal
+    :param order: The order that is refunded
+    :type order: Order
+    :param created: The creation time of this record
+    :type created: datetime
+    :param execution_date: The completion time of this refund
+    :type execution_date: datetime
+    :param provider: The payment provider in use
+    :type provider: str
+    :param info_data: Provider-specific meta information
+    :type info_data: dict
+    """
     REFUND_STATE_REQUESTED = 'requested'
     REFUND_STATE_APPROVED = 'approved'
     REFUND_STATE_EXTERNAL = 'external'

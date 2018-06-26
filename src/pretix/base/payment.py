@@ -17,7 +17,7 @@ from django.utils.translation import pgettext_lazy, ugettext_lazy as _
 from i18nfield.forms import I18nFormField, I18nTextarea
 from i18nfield.strings import LazyI18nString
 
-from pretix.base.models import CartPosition, Event, Order, Quota
+from pretix.base.models import CartPosition, Event, Order, OrderPayment, Quota
 from pretix.base.reldate import RelativeDateField, RelativeDateWrapper
 from pretix.base.settings import SettingsSandbox
 from pretix.base.signals import register_payment_providers
@@ -360,7 +360,7 @@ class BasePaymentProvider:
 
     def payment_form_render(self, request: HttpRequest) -> str:
         """
-        When the user selects this provider as his preferred payment method,
+        When the user selects this provider as their preferred payment method,
         they will be shown the HTML you return from this method.
 
         The default implementation will call :py:meth:`checkout_form`
@@ -375,8 +375,8 @@ class BasePaymentProvider:
 
     def checkout_confirm_render(self, request) -> str:
         """
-        If the user has successfully filled in his payment data, they will be redirected
-        to a confirmation page which lists all details of his order for a final review.
+        If the user has successfully filled in their payment data, they will be redirected
+        to a confirmation page which lists all details of their order for a final review.
         This method should return the HTML which should be displayed inside the
         'Payment' box on this page.
 
@@ -387,9 +387,9 @@ class BasePaymentProvider:
 
     def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> Union[bool, str]:
         """
-        Will be called after the user selects this provider as his payment method.
+        Will be called after the user selects this provider as their payment method.
         If you provided a form to the user to enter payment data, this method should
-        at least store the user's input into his session.
+        at least store the user's input into their session.
 
         This method should return ``False`` if the user's input was invalid, ``True``
         if the input was valid and the frontend should continue with default behavior
@@ -404,7 +404,7 @@ class BasePaymentProvider:
         If your payment method requires you to redirect the user to an external provider,
         this might be the place to do so.
 
-        .. IMPORTANT:: If this is called, the user has not yet confirmed his or her order.
+        .. IMPORTANT:: If this is called, the user has not yet confirmed their order.
            You may NOT do anything which actually moves money.
 
         :param cart: This dictionary contains at least the following keys:
@@ -439,7 +439,7 @@ class BasePaymentProvider:
         """
         raise NotImplementedError()  # NOQA
 
-    def payment_perform(self, request: HttpRequest, order: Order) -> str:
+    def execute_payment(self, request: HttpRequest, payment: OrderPayment) -> str:
         """
         After the user has confirmed their purchase, this method will be called to complete
         the payment process. This is the place to actually move the money if applicable.
@@ -447,12 +447,10 @@ class BasePaymentProvider:
         containing the URL the user will be redirected to. If you are done with your process
         you should return the user to the order's detail page.
 
-        If the payment is completed, you should call ``pretix.base.services.orders.mark_order_paid(order, provider, info)``
-        with ``provider`` being your :py:attr:`identifier` and ``info`` being any string
-        you might want to store for later usage. Please note that ``mark_order_paid`` might
-        raise a ``Quota.QuotaExceededException`` if (and only if) the payment term of this
-        order is over and some of the items are sold out. You should use the exception message
-        to display a meaningful error to the user.
+        If the payment is completed, you should call ``payment.confirm()``. Please note that ``this`` might
+        raise a ``Quota.QuotaExceededException`` if (and only if) the payment term of this order is over and
+        some of the items are sold out. You should use the exception message to display a meaningful error
+        to the user.
 
         The default implementation just returns ``None`` and therefore leaves the
         order unpaid. The user will be redirected to the order's detail page by default.
@@ -526,7 +524,7 @@ class BasePaymentProvider:
         raise DeprecationWarning('retry_prepare is deprecated, use order_prepare instead')
         return self.order_prepare(request, order)
 
-    def order_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
+    def payment_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
         """
         Will be called if the user retries to pay an unpaid order (after the user filled in
         e.g. the form returned by :py:meth:`payment_form`) or if the user changes the payment
@@ -546,18 +544,6 @@ class BasePaymentProvider:
             return True
         else:
             return False
-
-    def order_paid_render(self, request: HttpRequest, order: Order) -> str:
-        """
-        Will be called if the user views the detail page of a paid order which is
-        associated with this payment provider.
-
-        It should return HTML code which should be displayed to the user or None,
-        if there is nothing to say (like the default implementation does).
-
-        :param order: The order object
-        """
-        return None
 
     def order_control_render(self, request: HttpRequest, order: Order) -> str:
         """

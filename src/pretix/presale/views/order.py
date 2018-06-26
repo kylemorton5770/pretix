@@ -17,7 +17,7 @@ from django.views.generic import TemplateView, View
 
 from pretix.base.models import CachedTicket, Invoice, Order, OrderPosition
 from pretix.base.models.orders import (
-    CachedCombinedTicket, OrderFee, QuestionAnswer,
+    CachedCombinedTicket, OrderFee, OrderPayment, QuestionAnswer,
 )
 from pretix.base.payment import PaymentException
 from pretix.base.services.invoices import (
@@ -53,10 +53,6 @@ class OrderDetailMixin(NoSearchIndexViewMixin):
                 return None
             else:
                 return None
-
-    @cached_property
-    def payment_provider(self):
-        return self.request.event.get_payment_providers().get(self.order.payment_provider)
 
     def get_order_url(self):
         return eventreverse(self.request.event, 'presale:event.order', kwargs={
@@ -131,23 +127,24 @@ class OrderDetails(EventViewMixin, OrderDetailMixin, CartMixin, TemplateView):
             }
         )
 
-        if self.order.status == Order.STATUS_PENDING and self.payment_provider:
-            ctx['payment'] = self.payment_provider.order_pending_render(self.request, self.order)
+        if self.order.status == Order.STATUS_PENDING:
+            lp = self.order.payments.last()
+            pp = lp.payment_provider
+            ctx['payment'] = pp.order_pending_render(self.request, self.order)
             ctx['can_retry'] = (
-                self.payment_provider.order_can_retry(self.order)
-                and self.payment_provider.is_enabled
+                pp.order_can_retry(self.order)
+                and pp.is_enabled
                 and self.order._can_be_paid()
             )
 
             ctx['can_change_method'] = False
             for provider in self.request.event.get_payment_providers().values():
-                if (provider.identifier != self.order.payment_provider and provider.is_enabled
+                if (provider.identifier != pp.identifier and provider.is_enabled
                         and provider.order_change_allowed(self.order)):
                     ctx['can_change_method'] = True
                     break
 
         elif self.order.status == Order.STATUS_PAID:
-            ctx['payment'] = self.payment_provider.order_paid_render(self.request, self.order) if self.payment_provider else ''
             ctx['can_retry'] = False
         return ctx
 
@@ -165,8 +162,8 @@ class OrderPaymentStart(EventViewMixin, OrderDetailMixin, TemplateView):
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
         if (self.order.status not in (Order.STATUS_PENDING, Order.STATUS_EXPIRED)
-                or not self.payment_provider.order_can_retry(self.order)
-                or not self.payment_provider.is_enabled):
+                or not self.payment.payment_provider.order_can_retry(self.order)
+                or not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment for this order cannot be continued.'))
             return redirect(self.get_order_url())
 
@@ -177,7 +174,7 @@ class OrderPaymentStart(EventViewMixin, OrderDetailMixin, TemplateView):
         return super().dispatch(request, *args, **kwargs)
 
     def post(self, request, *args, **kwargs):
-        resp = self.payment_provider.order_prepare(request, self.order)
+        resp = self.payment.payment_provider.payment_prepare(request, self.payment)
         if 'payment_change_{}'.format(self.order.pk) in request.session:
             del request.session['payment_change_{}'.format(self.order.pk)]
         if isinstance(resp, str):
@@ -191,17 +188,22 @@ class OrderPaymentStart(EventViewMixin, OrderDetailMixin, TemplateView):
         ctx = super().get_context_data(**kwargs)
         ctx['order'] = self.order
         ctx['form'] = self.form
-        ctx['provider'] = self.payment_provider
+        ctx['provider'] = self.payment.payment_provider
         return ctx
 
     @cached_property
     def form(self):
-        return self.payment_provider.payment_form_render(self.request)
+        return self.payment.payment_provider.payment_form_render(self.request)
+
+    @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments, pk=self.kwargs['payment'])
 
     def get_confirm_url(self):
         return eventreverse(self.request.event, 'presale:event.order.pay.confirm', kwargs={
             'order': self.order.code,
-            'secret': self.order.secret
+            'secret': self.order.secret,
+            'payment': self.payment.pk
         })
 
 
@@ -214,23 +216,28 @@ class OrderPaymentConfirm(EventViewMixin, OrderDetailMixin, TemplateView):
     """
     template_name = "pretixpresale/event/order_pay_confirm.html"
 
+    @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments, pk=self.kwargs['payment'])
+
     def dispatch(self, request, *args, **kwargs):
         self.request = request
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
-        can_do = self.payment_provider.order_can_retry(self.order) or 'payment_change_{}'.format(self.order.pk) in request.session
-        if not can_do or not self.payment_provider.is_enabled:
+        can_do = self.payment.payment_provider.order_can_retry(self.order) or 'payment_change_{}'.format(
+            self.order.pk) in request.session
+        if not can_do or not self.payment.payment_provider.is_enabled:
             messages.error(request, _('The payment for this order cannot be continued.'))
             return redirect(self.get_order_url())
-        if (not self.payment_provider.payment_is_valid_session(request)
-                or not self.payment_provider.is_enabled):
+        if (not self.payment.payment_provider.payment_is_valid_session(request)
+                or not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment information you entered was incomplete.'))
             return redirect(self.get_payment_url())
         return super().dispatch(request, *args, **kwargs)
 
     def post(self, request, *args, **kwargs):
         try:
-            resp = self.payment_provider.payment_perform(request, self.order)
+            resp = self.payment.payment_provider.execute_payment(request, self.payment)
         except PaymentException as e:
             messages.error(request, str(e))
             return redirect(self.get_order_url())
@@ -241,14 +248,15 @@ class OrderPaymentConfirm(EventViewMixin, OrderDetailMixin, TemplateView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['order'] = self.order
-        ctx['payment'] = self.payment_provider.checkout_confirm_render(self.request)
-        ctx['payment_provider'] = self.payment_provider
+        ctx['payment'] = self.payment.payment_provider.checkout_confirm_render(self.request)
+        ctx['payment_provider'] = self.payment.payment_provider
         return ctx
 
     def get_payment_url(self):
         return eventreverse(self.request.event, 'presale:event.order.pay', kwargs={
             'order': self.order.code,
-            'secret': self.order.secret
+            'secret': self.order.secret,
+            'payment': self.payment.pk
         })
 
 
@@ -259,14 +267,22 @@ class OrderPaymentComplete(EventViewMixin, OrderDetailMixin, View):
     details and confirmed them during the order process and we don't need to show them again,
     we just need to perform the payment.
     """
+
+    @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments, pk=self.kwargs['payment'])
+
     def dispatch(self, request, *args, **kwargs):
         self.request = request
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
-        if (not self.payment_provider.payment_is_valid_session(request) or
-                not self.payment_provider.is_enabled):
+        if (not self.payment.payment_provider.payment_is_valid_session(request) or
+                not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment information you entered was incomplete.'))
             return redirect(self.get_payment_url())
+        if not self.payment or self.payment.state != OrderPayment.PAYMENT_STATE_CREATED:
+            messages.error(request, _('The payment is in an invalid state to perform this action.'))
+            return redirect(self.get_order_url())
 
         term_last = self.order.payment_term_last
         if term_last and now() > term_last:
@@ -277,7 +293,7 @@ class OrderPaymentComplete(EventViewMixin, OrderDetailMixin, View):
 
     def get(self, request, *args, **kwargs):
         try:
-            resp = self.payment_provider.payment_perform(request, self.order)
+            resp = self.payment.payment_provider.execute_payment(request, self.payment)
         except PaymentException as e:
             messages.error(request, str(e))
             return redirect(self.get_order_url())
@@ -290,6 +306,7 @@ class OrderPaymentComplete(EventViewMixin, OrderDetailMixin, View):
     def get_payment_url(self):
         return eventreverse(self.request.event, 'presale:event.order.pay', kwargs={
             'order': self.order.code,
+            'payment': self.payment.pk,
             'secret': self.order.secret
         })
 
@@ -313,10 +330,11 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
 
         return super().dispatch(request, *args, **kwargs)
 
-    def get_payment_url(self):
+    def get_payment_url(self, payment):
         return eventreverse(self.request.event, 'presale:event.order.pay', kwargs={
             'order': self.order.code,
-            'secret': self.order.secret
+            'secret': self.order.secret,
+            'payment': payment.pk
         })
 
     @cached_property
@@ -366,8 +384,17 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
                     except OrderFee.DoesNotExist:
                         old_fee = Decimal('0.00')
 
-                self.order.payment_provider = p['provider'].identifier
+                lp = self.order.payments.last()
+                if lp.state in [OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED]:
+                    lp.state = OrderPayment.PAYMENT_STATE_CANCELED
+                    lp.save()
+
                 self.order.total = self._total_order_value + (self.order.fees.aggregate(sum=Sum('value'))['sum'] or 0)
+                newpayment = self.order.payments.create(
+                    state=OrderPayment.PAYMENT_STATE_CREATED,
+                    provider=p['provider'].identifier,
+                    amount=self.order.total,
+                )
 
                 resp = p['provider'].order_prepare(request, self.order)
                 if resp:
@@ -387,7 +414,7 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
                 if isinstance(resp, str):
                     return redirect(resp)
                 elif resp is True:
-                    return redirect(self.get_confirm_url())
+                    return redirect(self.get_payment_url(newpayment))
                 else:
                     return self.get(request, *args, **kwargs)
         messages.error(self.request, _("Please select a payment method."))

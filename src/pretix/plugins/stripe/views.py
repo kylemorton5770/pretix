@@ -18,7 +18,9 @@ from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from pretix.base.models import Event, Order, Quota, RequiredAction
+from pretix.base.models import (
+    Event, Order, OrderPayment, Quota, RequiredAction,
+)
 from pretix.base.payment import PaymentException
 from pretix.base.services.locking import LockTimeoutException
 from pretix.base.services.orders import mark_order_paid, mark_order_refunded
@@ -326,8 +328,14 @@ class StripeOrderView:
         return super().dispatch(request, *args, **kwargs)
 
     @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments,
+                                 pk=self.kwargs['payment'],
+                                 provider__startswith='stripe')
+
+    @cached_property
     def pprov(self):
-        return self.request.event.get_payment_providers()[self.order.payment_provider]
+        return self.request.event.get_payment_providers()[self.payment.provider]
 
 
 @method_decorator(xframe_options_exempt, 'dispatch')
@@ -343,14 +351,15 @@ class ReturnView(StripeOrderView, View):
 
         with transaction.atomic():
             self.order.refresh_from_db()
-            if self.order.status == Order.STATUS_PAID:
+            self.payment.refresh_from_db()
+            if self.payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
                 if 'payment_stripe_token' in request.session:
                     del request.session['payment_stripe_token']
                 return self._redirect_to_order()
 
             if src.status == 'chargeable':
                 try:
-                    prov._charge_source(request, src.id, self.order)
+                    prov._charge_source(request, src.id, self.payment)
                 except PaymentException as e:
                     messages.error(request, str(e))
                     return self._redirect_to_order()

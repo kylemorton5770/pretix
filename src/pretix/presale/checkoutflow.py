@@ -622,7 +622,8 @@ class ConfirmStep(CartMixin, AsyncAction, TemplateFlowStep):
     def get_order_url(self, order):
         return eventreverse(self.request.event, 'presale:event.order.pay.complete', kwargs={
             'order': order.code,
-            'secret': order.secret
+            'secret': order.secret,
+            'payment': order.payments.first().pk
         })
 
 
