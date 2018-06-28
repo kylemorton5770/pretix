@@ -14,7 +14,6 @@ from django.http import FileResponse, Http404, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.formats import date_format
 from django.utils.functional import cached_property
-from django.utils.safestring import mark_safe
 from django.utils.timezone import now
 from django.utils.translation import ugettext_lazy as _
 from django.views.generic import (
@@ -137,12 +136,10 @@ class OrderDetail(OrderView):
         ctx['items'] = self.get_items()
         ctx['event'] = self.request.event
         ctx['payment_provider'] = self.payment_provider
-        if self.payment_provider:
-            ctx['payment'] = self.payment_provider.order_control_render(self.request, self.object)
-        else:
-            ctx['payment'] = mark_safe('<div class="alert alert-danger">{}</div>'.format(
-                _('This order was paid using a payment provider plugin that is now disabled or uninstalled.')
-            ))
+        ctx['payments'] = self.order.payments.order_by('-created')
+        for p in ctx['payments']:
+            if p.payment_provider:
+                p.html_info = (p.payment_provider.payment_control_render(self.request, p) or "").strip()
         ctx['invoices'] = list(self.order.invoices.all().select_related('event'))
         ctx['comment_form'] = CommentForm(initial={
             'comment': self.order.comment,

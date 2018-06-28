@@ -531,10 +531,9 @@ class BasePaymentProvider:
         else:
             return False
 
-    def order_control_render(self, request: HttpRequest, order: Order) -> str:
+    def payment_control_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         """
-        Will be called if the *event administrator* views the detail page of an order
-        which is associated with this payment provider.
+        Will be called if the *event administrator* views the details of a payment.
 
         It should return HTML code containing information regarding the current payment
         status and, if applicable, next steps.

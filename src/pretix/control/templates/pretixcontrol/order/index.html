@@ -355,10 +355,44 @@
                     <div class="panel panel-default items">
                         <div class="panel-heading">
                             <h3 class="panel-title">
-                                {% trans "Payment information" %}
+                                {% trans "Payments" %}
                             </h3>
                         </div>
                         <div class="panel-body">
+                            <div class="table-responsive">
+                                <table class="table table-condensed">
+                                    <thead>
+                                        <tr>
+                                            <th>{% trans "Start date" %}</th>
+                                            <th>{% trans "Confirmation date" %}</th>
+                                            <th>{% trans "Payment method" %}</th>
+                                            <th class="text-right">{% trans "Amount" %}</th>
+                                            <th class="text-right">{% trans "Status" %}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                    {% for p in payments %}
+                                        <tr>
+                                            <td>{{ p.created|date:"SHORT_DATETIME_FORMAT" }}</td>
+                                            <td>{{ p.payment_date|date:"SHORT_DATETIME_FORMAT" }}</td>
+                                            <td>{{ p.payment_provider.verbose_name }}</td>
+                                            <td class="text-right">{{ p.amount|money:request.event.currency }}</td>
+                                            <td class="text-right">
+                                                <span class="label label-{% if p.state == "created" or p.state == "pending" %}warning{% elif p.state == "confirmed" %}success{% else %}danger{% endif %}">
+                                                    {{ p.get_state_display }}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                        {% if p.html_info %}
+                                            <tr>
+                                                <td colspan="2"></td>
+                                                <td colspan="3">{{ p.html_info|safe }}</td>
+                                            </tr>
+                                        {% endif %}
+                                    {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
                             {% if order.payment_manual %}
                                 <div class="alert alert-info">
                                     {% trans "The payment state of this order was manually modified." %}
