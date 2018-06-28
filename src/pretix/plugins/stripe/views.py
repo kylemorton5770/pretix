@@ -367,6 +367,9 @@ class ReturnView(StripeOrderView, View):
                     if 'payment_stripe_token' in request.session:
                         del request.session['payment_stripe_token']
             else:
+                self.payment.state = OrderPayment.PAYMENT_STATE_FAILED
+                self.payment.info = str(src)
+                self.payment.save()
                 messages.error(self.request, _('We had trouble authorizing your card payment. Please try again and '
                                                'get in touch with us if this problem persists.'))
         return self._redirect_to_order()

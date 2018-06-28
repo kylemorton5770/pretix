@@ -128,24 +128,29 @@ class OrderDetails(EventViewMixin, OrderDetailMixin, CartMixin, TemplateView):
         )
 
         if self.order.status == Order.STATUS_PENDING:
-            lp = self.order.payments.last()
-            pp = lp.payment_provider
-            ctx['payment'] = pp.order_pending_render(self.request, self.order)
-            ctx['can_retry'] = (
-                pp.order_can_retry(self.order)
-                and pp.is_enabled
-                and self.order._can_be_paid()
-            )
+            ctx['pending_sum'] = self.order.pending_sum
 
-            ctx['can_change_method'] = False
+            lp = self.order.payments.last()
+            ctx['can_pay'] = False
+
             for provider in self.request.event.get_payment_providers().values():
-                if (provider.identifier != pp.identifier and provider.is_enabled
-                        and provider.order_change_allowed(self.order)):
-                    ctx['can_change_method'] = True
+                if provider.is_enabled and provider.order_change_allowed(self.order):
+                    ctx['can_pay'] = True
                     break
 
+            if lp and lp.state not in (OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED):
+                ctx['last_payment'] = self.order.payments.last()
+
+                pp = lp.payment_provider
+                ctx['last_payment_info'] = pp.payment_pending_render(self.request, ctx['last_payment'])
+
+                if lp.state == OrderPayment.PAYMENT_STATE_PENDING and not pp.abort_pending_allowed:
+                    ctx['can_pay'] = False
+
+            ctx['can_pay'] = ctx['can_pay'] and self.order._can_be_paid()
+
         elif self.order.status == Order.STATUS_PAID:
-            ctx['can_retry'] = False
+            ctx['can_pay'] = False
         return ctx
 
 
@@ -162,7 +167,6 @@ class OrderPaymentStart(EventViewMixin, OrderDetailMixin, TemplateView):
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
         if (self.order.status not in (Order.STATUS_PENDING, Order.STATUS_EXPIRED)
-                or not self.payment.payment_provider.order_can_retry(self.order)
                 or not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment for this order cannot be continued.'))
             return redirect(self.get_order_url())
@@ -224,15 +228,19 @@ class OrderPaymentConfirm(EventViewMixin, OrderDetailMixin, TemplateView):
         self.request = request
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
-        can_do = self.payment.payment_provider.order_can_retry(self.order) or 'payment_change_{}'.format(
-            self.order.pk) in request.session
-        if not can_do or not self.payment.payment_provider.is_enabled:
+        if self.payment.state != OrderPayment.PAYMENT_STATE_CREATED:
             messages.error(request, _('The payment for this order cannot be continued.'))
             return redirect(self.get_order_url())
-        if (not self.payment.payment_provider.payment_is_valid_session(request)
-                or not self.payment.payment_provider.is_enabled):
+        if (not self.payment.payment_provider.payment_is_valid_session(request) or
+                not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment information you entered was incomplete.'))
             return redirect(self.get_payment_url())
+
+        term_last = self.order.payment_term_last
+        if term_last and now() > term_last:
+            messages.error(request, _('The payment is too late to be accepted.'))
+            return redirect(self.get_order_url())
+
         return super().dispatch(request, *args, **kwargs)
 
     def post(self, request, *args, **kwargs):
@@ -248,7 +256,8 @@ class OrderPaymentConfirm(EventViewMixin, OrderDetailMixin, TemplateView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['order'] = self.order
-        ctx['payment'] = self.payment.payment_provider.checkout_confirm_render(self.request)
+        ctx['payment'] = self.payment
+        ctx['payment_info'] = self.payment.payment_provider.checkout_confirm_render(self.request)
         ctx['payment_provider'] = self.payment.payment_provider
         return ctx
 
@@ -276,13 +285,13 @@ class OrderPaymentComplete(EventViewMixin, OrderDetailMixin, View):
         self.request = request
         if not self.order:
             raise Http404(_('Unknown order code or not authorized to access this order.'))
+        if self.payment.state != OrderPayment.PAYMENT_STATE_CREATED:
+            messages.error(request, _('The payment for this order cannot be continued.'))
+            return redirect(self.get_order_url())
         if (not self.payment.payment_provider.payment_is_valid_session(request) or
                 not self.payment.payment_provider.is_enabled):
             messages.error(request, _('The payment information you entered was incomplete.'))
             return redirect(self.get_payment_url())
-        if not self.payment or self.payment.state != OrderPayment.PAYMENT_STATE_CREATED:
-            messages.error(request, _('The payment is in an invalid state to perform this action.'))
-            return redirect(self.get_order_url())
 
         term_last = self.order.payment_term_last
         if term_last and now() > term_last:
@@ -328,6 +337,12 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
             messages.error(request, _('The payment is too late to be accepted.'))
             return redirect(self.get_order_url())
 
+        if self.open_payment:
+            pp = self.open_payment.payment_provider
+            if self.open_payment.state == OrderPayment.PAYMENT_STATE_PENDING and not pp.abort_pending_allowed:
+                messages.error(request, _('A payment is currently pending for this order.'))
+                return redirect(self.get_order_url())
+
         return super().dispatch(request, *args, **kwargs)
 
     def get_payment_url(self, payment):
@@ -338,83 +353,102 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
         })
 
     @cached_property
-    def _total_order_value(self):
+    def open_payment(self):
+        lp = self.order.payments.last()
+        if lp and lp.state not in (OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED):
+            return lp
+        return None
+
+    @cached_property
+    def _position_sum(self):
         return self.order.positions.aggregate(sum=Sum('price'))['sum']
 
     @cached_property
     def provider_forms(self):
         providers = []
+        pending_sum = self.order.pending_sum
         for provider in self.request.event.get_payment_providers().values():
-            if provider.identifier == self.order.payment_provider:
-                continue
             if not provider.is_enabled or not provider.order_change_allowed(self.order):
                 continue
-            fee = provider.calculate_fee(self._total_order_value)
-            current_fee = self.order.fees.filter(fee_type=OrderFee.FEE_TYPE_PAYMENT).aggregate(s=Sum('value'))['s'] or Decimal('0.00')
+            if self.open_payment and self.open_payment.fee:
+                current_fee = self.open_payment.fee.value
+            else:
+                current_fee = Decimal('0.00')
+            fee = provider.calculate_fee(pending_sum - current_fee)
             providers.append({
                 'provider': provider,
                 'fee': fee,
                 'fee_diff': fee - current_fee,
                 'fee_diff_abs': abs(fee - current_fee),
-                'total': abs(self._total_order_value + fee),
+                'total': abs(pending_sum + fee - current_fee),
                 'form': provider.payment_form_render(self.request)
             })
         return providers
 
     def post(self, request, *args, **kwargs):
         self.request = request
+        oldtotal = self.order.total
         for p in self.provider_forms:
             if p['provider'].identifier == request.POST.get('payment', ''):
                 request.session['payment'] = p['provider'].identifier
                 request.session['payment_change_{}'.format(self.order.pk)] = '1'
 
-                new_fee = p['provider'].calculate_fee(self._total_order_value)
+                if self.open_payment and self.open_payment.fee:
+                    fee = self.open_payment.fee
+                else:
+                    fee = OrderFee(fee_type=OrderFee.FEE_TYPE_PAYMENT, value=Decimal('0.00'), order=self.order)
+                old_fee = fee.value
+
+                new_fee = p['provider'].calculate_fee(self.order.pending_sum - old_fee)
                 if new_fee:
-                    fee = self.order.fees.get_or_create(fee_type=OrderFee.FEE_TYPE_PAYMENT, defaults={'value': 0})[0]
-                    old_fee = fee.value
                     fee.value = new_fee
                     fee.internal_type = p['provider'].identifier
                     fee._calculate_tax()
                     fee.save()
                 else:
-                    try:
-                        fee = self.order.fees.get(fee_type=OrderFee.FEE_TYPE_PAYMENT)
-                        old_fee = fee.value
+                    if fee.pk:
                         fee.delete()
-                    except OrderFee.DoesNotExist:
-                        old_fee = Decimal('0.00')
 
-                lp = self.order.payments.last()
-                if lp.state in [OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED]:
-                    lp.state = OrderPayment.PAYMENT_STATE_CANCELED
-                    lp.save()
+                if self.open_payment and self.open_payment.state in (OrderPayment.PAYMENT_STATE_PENDING,
+                                                                     OrderPayment.PAYMENT_STATE_CREATED):
+                    self.open_payment.state = OrderPayment.PAYMENT_STATE_CANCELED
+                    self.open_payment.save()
 
-                self.order.total = self._total_order_value + (self.order.fees.aggregate(sum=Sum('value'))['sum'] or 0)
+                self.order.total = self._position_sum + (self.order.fees.aggregate(sum=Sum('value'))['sum'] or 0)
                 newpayment = self.order.payments.create(
                     state=OrderPayment.PAYMENT_STATE_CREATED,
                     provider=p['provider'].identifier,
-                    amount=self.order.total,
+                    amount=self.order.pending_sum,
+                    fee=fee
                 )
 
-                resp = p['provider'].order_prepare(request, self.order)
+                resp = p['provider'].payment_prepare(request, newpayment)
                 if resp:
                     with transaction.atomic():
-                        self.order.log_action('pretix.event.order.payment.changed', {
-                            'old_fee': old_fee,
-                            'new_fee': new_fee,
-                            'old_provider': self.order.payment_provider,
-                            'new_provider': p['provider'].identifier
-                        })
+                        if self.open_payment and self.open_payment.provider != p['provider'].identifier:
+                            self.order.log_action('pretix.event.order.payment.changed', {
+                                'old_fee': old_fee,
+                                'new_fee': new_fee,
+                                'old_provider': self.open_payment.provider,
+                                'new_provider': p['provider'].identifier,
+                                'payment': newpayment.pk
+                            })
+                        else:
+                            self.order.log_action('pretix.event.order.payment.started', {
+                                'fee': new_fee,
+                                'provider': p['provider'].identifier,
+                                'payment': newpayment.pk
+                            })
                         self.order.save()
 
                         i = self.order.invoices.filter(is_cancellation=False).last()
-                        if i:
+                        if i and self.order.total != oldtotal:
                             generate_cancellation(i)
                             generate_invoice(self.order)
                 if isinstance(resp, str):
                     return redirect(resp)
                 elif resp is True:
-                    return redirect(self.get_payment_url(newpayment))
+                    return redirect(self.get_confirm_url(newpayment))
                 else:
                     return self.get(request, *args, **kwargs)
         messages.error(self.request, _("Please select a payment method."))
@@ -426,10 +460,11 @@ class OrderPayChangeMethod(EventViewMixin, OrderDetailMixin, TemplateView):
         ctx['providers'] = self.provider_forms
         return ctx
 
-    def get_confirm_url(self):
+    def get_confirm_url(self, payment):
         return eventreverse(self.request.event, 'presale:event.order.pay.confirm', kwargs={
             'order': self.order.code,
-            'secret': self.order.secret
+            'secret': self.order.secret,
+            'payment': payment.pk
         })
 
 

@@ -271,8 +271,8 @@ class StripeMethod(BasePaymentProvider):
         ctx = {'request': request, 'event': self.event, 'settings': self.settings, 'provider': self}
         return template.render(ctx)
 
-    def order_can_retry(self, order):
-        return self._is_still_available(order=order)
+    def payment_can_retry(self, payment):
+        return self._is_still_available(order=payment.order)
 
     def _charge_source(self, request, source, payment):
         try:
@@ -360,9 +360,9 @@ class StripeMethod(BasePaymentProvider):
                 payment.save()
                 raise PaymentException(_('Stripe reported an error: %s') % charge.failure_message)
 
-    def order_pending_render(self, request, order) -> str:
-        if order.payment_info:
-            payment_info = json.loads(order.payment_info)
+    def payment_pending_render(self, request, payment) -> str:
+        if payment.info:
+            payment_info = json.loads(payment.info)
         else:
             payment_info = None
         template = get_template('pretixplugins/stripe/pending.html')
@@ -371,7 +371,8 @@ class StripeMethod(BasePaymentProvider):
             'event': self.event,
             'settings': self.settings,
             'provider': self,
-            'order': order,
+            'order': payment.order,
+            'payment': payment,
             'payment_info': payment_info,
         }
         return template.render(ctx)
@@ -919,12 +920,5 @@ class StripeSofort(StripeMethod):
             return True
         return False
 
-    def order_can_retry(self, order):
-        try:
-            if order.payment_info:
-                d = json.loads(order.payment_info)
-                if d.get('object') == 'charge' and d.get('status') == 'pending':
-                    return False
-        except ValueError:
-            pass
-        return self._is_still_available(order=order)
+    def payment_can_retry(self, payment):
+        return payment.state != OrderPayment.PAYMENT_STATE_PENDING and self._is_still_available(order=payment.order)

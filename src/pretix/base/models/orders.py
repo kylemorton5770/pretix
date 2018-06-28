@@ -204,10 +204,10 @@ class Order(LoggedModel):
 
     @property
     def pending_sum(self):
-        payment_sum = self.order.payments.filter(
-            state=self.PAYMENT_STATE_CONFIRMED
+        payment_sum = self.payments.filter(
+            state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
-        refund_sum = self.order.refunds.filter(
+        refund_sum = self.refunds.filter(
             state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         return self.total - payment_sum + refund_sum
@@ -788,6 +788,10 @@ class OrderPayment(models.Model):
         verbose_name=_("Payment information"),
         null=True, blank=True
     )
+    fee = models.ForeignKey(
+        'OrderFee',
+        null=True, blank=True, related_name='payments'
+    )
 
     class Meta:
         ordering = ('created',)
@@ -832,7 +836,7 @@ class OrderPayment(models.Model):
             return
 
         payment_sum = self.order.payments.filter(
-            state=self.PAYMENT_STATE_CONFIRMED
+            state__in=(self.PAYMENT_STATE_CONFIRMED, self.PAYMENT_STATE_REFUNDED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         refund_sum = self.order.refunds.filter(
             state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)

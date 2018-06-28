@@ -132,6 +132,16 @@ class BasePaymentProvider:
         raise NotImplementedError()  # NOQA
 
     @property
+    def abort_pending_allowed(self) -> bool:
+        """
+        Whether or not a user can abort a payment in pending start to switch to another
+        payment method. This returns ``False`` by default which is no guarantee that
+        aborting a pending payment can never happen, it just hides the frontend button
+        to avoid users accidentally committing double payments.
+        """
+        return False
+
+    @property
     def settings_form_fields(self) -> dict:
         """
         When the event's administrator visits the event configuration
@@ -500,31 +510,7 @@ class BasePaymentProvider:
 
         return self._is_still_available(order=order)
 
-    def order_can_retry(self, order: Order) -> bool:
-        """
-        Will be called if the user views the detail page of an unpaid order to determine
-        whether the user should be presented with an option to retry the payment. The default
-        implementation always returns False.
-
-        If you want to enable retrials for your payment method, the best is to just return
-        ``self._is_still_available()`` from this method to disable it as soon as the method
-        gets disabled or the methods end date is reached.
-
-        The retry workflow is also used if a user switches to this payment method for an existing
-        order!
-
-        :param order: The order object
-        """
-        return False
-
-    def retry_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
-        """
-        Deprecated, use order_prepare instead
-        """
-        raise DeprecationWarning('retry_prepare is deprecated, use order_prepare instead')
-        return self.order_prepare(request, order)
-
-    def payment_prepare(self, request: HttpRequest, order: Order) -> Union[bool, str]:
+    def payment_prepare(self, request: HttpRequest, payment: OrderPayment) -> Union[bool, str]:
         """
         Will be called if the user retries to pay an unpaid order (after the user filled in
         e.g. the form returned by :py:meth:`payment_form`) or if the user changes the payment
@@ -636,7 +622,7 @@ class FreeOrderProvider(BasePaymentProvider):
     def checkout_confirm_render(self, request: HttpRequest) -> str:
         return _("No payment is required as this order only includes products which are free of charge.")
 
-    def order_pending_render(self, request: HttpRequest, order: Order) -> str:
+    def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
         pass
 
     def payment_is_valid_session(self, request: HttpRequest) -> bool:
