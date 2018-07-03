@@ -39,7 +39,7 @@
                         </a>
                     {% elif order.status == 'p' %}
                         <button name="status" value="n" class="btn btn-default">{% trans "Mark as not paid" %}</button>
-                        <a href="{% url "control:event.order.transition" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}?status=r" class="btn btn-default">
+                        <a href="{% url "control:event.order.refunds.start" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}" class="btn btn-default">
                             {% trans "Refund order" %}
                         </a>
                     {% endif %}
@@ -68,16 +68,23 @@
     {% endif %}
 
     {% if overpaid > 0 %}
-        <div class="alert alert-warning">
-            {% blocktrans trimmed with amount=overpaid|money:request.event.currency %}
-                This order is currently overpaid by {{ amount }}.
-            {% endblocktrans %}
-            <a href="" class="btn btn-primary ">
+        <form action="{% url "control:event.order.refunds.start" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}"
+            method="post">
+            {% csrf_token %}
+            <input type="hidden" name="start-action" value="do_nothing">
+            <input type="hidden" name="start-mode" value="partial">
+            <input type="hidden" name="start-partial_amount" value="{{ overpaid }}">
+            <div class="alert alert-warning">
                 {% blocktrans trimmed with amount=overpaid|money:request.event.currency %}
-                    Initiate a refund of {{ amount }}
+                    This order is currently overpaid by {{ amount }}.
                 {% endblocktrans %}
-            </a>
-        </div>
+                <button class="btn btn-primary" type="submit">
+                    {% blocktrans trimmed with amount=overpaid|money:request.event.currency %}
+                        Initiate a refund of {{ amount }}
+                    {% endblocktrans %}
+                </button>
+            </div>
+        </form>
     {% endif %}
 
     <div class="row">

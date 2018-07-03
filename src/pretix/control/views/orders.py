@@ -50,7 +50,7 @@ from pretix.control.forms.filter import EventOrderFilterForm
 from pretix.control.forms.orders import (
     CommentForm, ExporterForm, ExtendForm, MarkPaidForm, OrderContactForm,
     OrderLocaleForm, OrderMailForm, OrderPositionAddForm,
-    OrderPositionChangeForm, OtherOperationsForm,
+    OrderPositionChangeForm, OrderRefundForm, OtherOperationsForm,
 )
 from pretix.control.permissions import EventPermissionRequiredMixin
 from pretix.control.views import PaginationMixin
@@ -287,6 +287,36 @@ class OrderPaymentConfirm(OrderView):
         })
 
 
+class OrderRefund(OrderView):
+    permission = 'can_change_orders'
+
+    @cached_property
+    def start_form(self):
+        return OrderRefundForm(
+            order=self.order,
+            data=self.request.POST if self.request.method == "POST" else None,
+            prefix='start',
+            initial={
+                'partial_amount': self.order.total - self.order.pending_sum,
+                'action': (
+                    'mark_pending' if self.order.status == Order.STATUS_PAID
+                    else 'do_nothing'
+                )
+            }
+        )
+
+    def post(self, *args, **kwargs):
+        if not self.start_form.is_valid():
+            return self.get(*args, **kwargs)
+        return redirect(self.get_order_url())
+
+    def get(self, *args, **kwargs):
+        return render(self.request, 'pretixcontrol/order/refund_start.html', {
+            'form': self.start_form,
+            'order': self.order,
+        })
+
+
 class OrderTransition(OrderView):
     permission = 'can_change_orders'
 
@@ -334,13 +364,6 @@ class OrderTransition(OrderView):
         elif self.order.status == Order.STATUS_PENDING and to == 'e':
             mark_order_expired(self.order, user=self.request.user)
             messages.success(self.request, _('The order has been marked as expired.'))
-        elif self.order.status == Order.STATUS_PAID and to == 'r':
-            if not self.payment_provider:
-                messages.error(self.request, _('This order is not assigned to a known payment provider.'))
-            else:
-                ret = self.payment_provider.order_control_refund_perform(self.request, self.order)
-                if ret:
-                    return redirect(ret)
         return redirect(self.get_order_url())
 
     def get(self, *args, **kwargs):
@@ -353,20 +376,6 @@ class OrderTransition(OrderView):
         elif self.order.cancel_allowed() and to == 'c':
             return render(self.request, 'pretixcontrol/order/cancel.html', {
                 'order': self.order,
-            })
-        elif self.order.status == Order.STATUS_PAID and to == 'r':
-            if not self.payment_provider:
-                messages.error(self.request, _('This order is not assigned to a known payment provider.'))
-                return redirect(self.get_order_url())
-
-            try:
-                cr = self.payment_provider.order_control_refund_render(self.order, self.request)
-            except TypeError:
-                cr = self.payment_provider.order_control_refund_render(self.order)
-
-            return render(self.request, 'pretixcontrol/order/refund.html', {
-                'order': self.order,
-                'payment': cr,
             })
         else:
             return HttpResponseNotAllowed(['POST'])

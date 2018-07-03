@@ -202,6 +202,8 @@ urlpatterns = [
             name='event.order.payments.cancel'),
         url(r'^orders/(?P<code>[0-9A-Z]+)/payments/(?P<payment>\d+)/confirm$', orders.OrderPaymentConfirm.as_view(),
             name='event.order.payments.confirm'),
+        url(r'^orders/(?P<code>[0-9A-Z]+)/refund', orders.OrderRefund.as_view(),
+            name='event.order.refunds.start'),
         url(r'^orders/(?P<code>[0-9A-Z]+)/$', orders.OrderDetail.as_view(), name='event.order'),
         url(r'^invoice/(?P<invoice>[^/]+)$', orders.InvoiceDownload.as_view(),
             name='event.invoice.download'),
