@@ -395,6 +395,14 @@ class BasePaymentProvider:
         """
         raise NotImplementedError()  # NOQA
 
+    def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
+        """
+        Render customer-facing instructions on how to proceed with a pending payment
+
+        :return: HTML
+        """
+        return ""
+
     def checkout_prepare(self, request: HttpRequest, cart: Dict[str, Any]) -> Union[bool, str]:
         """
         Will be called after the user selects this provider as their payment method.
@@ -620,9 +628,6 @@ class FreeOrderProvider(BasePaymentProvider):
 
     def checkout_confirm_render(self, request: HttpRequest) -> str:
         return _("No payment is required as this order only includes products which are free of charge.")
-
-    def payment_pending_render(self, request: HttpRequest, payment: OrderPayment) -> str:
-        pass
 
     def payment_is_valid_session(self, request: HttpRequest) -> bool:
         return True

@@ -28,8 +28,9 @@ from pretix.base.models import (
     generate_position_secret, generate_secret,
 )
 from pretix.base.models.event import SubEvent
-from pretix.base.models.orders import OrderFee
+from pretix.base.models.orders import OrderFee, OrderPayment
 from pretix.base.models.tax import EU_COUNTRIES
+from pretix.base.payment import PaymentException
 from pretix.base.services.export import export
 from pretix.base.services.invoices import (
     generate_cancellation, generate_invoice, invoice_pdf, invoice_pdf_task,
@@ -39,7 +40,7 @@ from pretix.base.services.locking import LockTimeoutException
 from pretix.base.services.mail import SendMailException, render_mail
 from pretix.base.services.orders import (
     OrderChangeManager, OrderError, cancel_order, extend_order,
-    mark_order_expired, mark_order_paid,
+    mark_order_expired,
 )
 from pretix.base.services.stats import order_overview
 from pretix.base.signals import register_data_exporters
@@ -146,6 +147,8 @@ class OrderDetail(OrderView):
             'checkin_attention': self.order.checkin_attention
         })
         ctx['display_locale'] = dict(settings.LANGUAGES)[self.object.locale or self.request.event.settings.locale]
+
+        ctx['overpaid'] = self.order.pending_sum * -1
         return ctx
 
     def get_items(self):
@@ -220,6 +223,70 @@ class OrderComment(OrderView):
         return HttpResponseNotAllowed(['POST'])
 
 
+class OrderPaymentCancel(OrderView):
+    permission = 'can_change_orders'
+
+    @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments, pk=self.kwargs['payment'])
+
+    def post(self, *args, **kwargs):
+        if self.payment.state in (OrderPayment.PAYMENT_STATE_CREATED, OrderPayment.PAYMENT_STATE_PENDING):
+            self.payment.state = OrderPayment.PAYMENT_STATE_CANCELED
+            self.payment.save()
+            messages.error(self.request, _('This payment has been canceled.'))
+        else:
+            messages.error(self.request, _('This payment can not be canceled at the moment.'))
+        return redirect(self.get_order_url())
+
+    def get(self, *args, **kwargs):
+        return render(self.request, 'pretixcontrol/order/pay_cancel.html', {
+            'order': self.order,
+        })
+
+
+class OrderPaymentConfirm(OrderView):
+    permission = 'can_change_orders'
+
+    @cached_property
+    def payment(self):
+        return get_object_or_404(self.order.payments, pk=self.kwargs['payment'])
+
+    @cached_property
+    def mark_paid_form(self):
+        return MarkPaidForm(
+            instance=self.order,
+            data=self.request.POST if self.request.method == "POST" else None,
+        )
+
+    def post(self, *args, **kwargs):
+        if not self.mark_paid_form.is_valid():
+            return render(self.request, 'pretixcontrol/order/pay.html', {
+                'form': self.mark_paid_form,
+                'order': self.order,
+            })
+        try:
+            self.payment.confirm(user=self.request.user,
+                                 count_waitinglist=False,
+                                 force=self.mark_paid_form.cleaned_data.get('force', False))
+        except Quota.QuotaExceededException as e:
+            messages.error(self.request, str(e))
+        except PaymentException as e:
+            messages.error(self.request, str(e))
+        except SendMailException:
+            messages.warning(self.request, _('The order has been marked as paid, but we were unable to send a '
+                                             'confirmation mail.'))
+        else:
+            messages.success(self.request, _('The order has been marked as paid.'))
+        return redirect(self.get_order_url())
+
+    def get(self, *args, **kwargs):
+        return render(self.request, 'pretixcontrol/order/pay.html', {
+            'form': self.mark_paid_form,
+            'order': self.order,
+        })
+
+
 class OrderTransition(OrderView):
     permission = 'can_change_orders'
 
@@ -233,20 +300,28 @@ class OrderTransition(OrderView):
     def post(self, *args, **kwargs):
         to = self.request.POST.get('status', '')
         if self.order.status in (Order.STATUS_PENDING, Order.STATUS_EXPIRED) and to == 'p':
-            if not self.mark_paid_form.is_valid():
-                return render(self.request, 'pretixcontrol/order/pay.html', {
-                    'form': self.mark_paid_form,
-                    'order': self.order,
-                })
+            self.order.payments.filter(state__in=(OrderPayment.PAYMENT_STATE_PENDING,
+                                                  OrderPayment.PAYMENT_STATE_CONFIRMED)) \
+                .update(state=OrderPayment.PAYMENT_STATE_CANCELED)
+            ps = self.order.pending_sum
+            if ps:
+                p = self.order.payments.create(
+                    state=OrderPayment.PAYMENT_STATE_CREATED,
+                    provider='manual',
+                    amount=self.order.pending_sum,
+                    fee=None
+                )
             try:
-                mark_order_paid(self.order, manual=True, user=self.request.user,
-                                count_waitinglist=False, force=self.mark_paid_form.cleaned_data.get('force', False))
+                p.confirm()
             except Quota.QuotaExceededException as e:
                 messages.error(self.request, str(e))
+            except PaymentException as e:
+                messages.error(self.request, str(e))
             except SendMailException:
-                messages.warning(self.request, _('The order has been marked as paid, but we were unable to send a confirmation mail.'))
+                messages.warning(self.request, _('The payment has been marked as complete, but we were unable to send a '
+                                                 'confirmation mail.'))
             else:
-                messages.success(self.request, _('The order has been marked as paid.'))
+                messages.success(self.request, _('The payment has been marked as complete.'))
         elif self.order.cancel_allowed() and to == 'c':
             cancel_order(self.order, user=self.request.user, send_mail=self.request.POST.get("send_email") == "on")
             messages.success(self.request, _('The order has been canceled.'))

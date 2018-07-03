@@ -933,15 +933,17 @@ class OrderRefund(models.Model):
     REFUND_STATE_DONE = 'done'
     REFUND_STATE_REJECTED = 'rejected'
     REFUND_STATE_CANCELED = 'canceled'
+    REFUND_STATE_CREATED = 'created'
 
     REFUND_STATES = (
         (REFUND_STATE_REQUESTED, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_APPROVED, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_EXTERNAL, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_TRANSIT, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_DONE, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_REJECTED, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_CANCELED, pgettext_lazy('refund_state', 'requested')),
+        (REFUND_STATE_APPROVED, pgettext_lazy('refund_state', 'approved')),
+        (REFUND_STATE_EXTERNAL, pgettext_lazy('refund_state', 'processed externally')),
+        (REFUND_STATE_CREATED, pgettext_lazy('refund_state', 'created')),
+        (REFUND_STATE_TRANSIT, pgettext_lazy('refund_state', 'in transit')),
+        (REFUND_STATE_DONE, pgettext_lazy('refund_state', 'done')),
+        (REFUND_STATE_REJECTED, pgettext_lazy('refund_state', 'rejected')),
+        (REFUND_STATE_CANCELED, pgettext_lazy('refund_state', 'canceled')),
     )
 
     REFUND_SOURCE_BUYER = 'buyer'
@@ -967,6 +969,12 @@ class OrderRefund(models.Model):
     order = models.ForeignKey(
         Order,
         verbose_name=_("Order"),
+        related_name='refunds',
+        on_delete=models.PROTECT
+    )
+    payment = models.ForeignKey(
+        OrderPayment,
+        null=True, blank=True,
         related_name='refunds',
         on_delete=models.PROTECT
     )
