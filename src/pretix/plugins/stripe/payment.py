@@ -18,11 +18,10 @@ from django.utils.translation import pgettext, ugettext, ugettext_lazy as _
 
 from pretix import __version__
 from pretix.base.models import (
-    Event, Order, OrderPayment, Quota, RequiredAction,
+    Event, Order, OrderPayment, OrderRefund, Quota, RequiredAction,
 )
 from pretix.base.payment import BasePaymentProvider, PaymentException
 from pretix.base.services.mail import SendMailException
-from pretix.base.services.orders import mark_order_refunded
 from pretix.base.settings import SettingsSandbox
 from pretix.helpers.urls import build_absolute_uri as build_global_uri
 from pretix.multidomain.urlreverse import build_absolute_uri
@@ -30,18 +29,6 @@ from pretix.plugins.stripe.forms import StripeKeyValidator
 from pretix.plugins.stripe.models import ReferencedStripeObject
 
 logger = logging.getLogger('pretix.plugins.stripe')
-
-
-class RefundForm(forms.Form):
-    auto_refund = forms.ChoiceField(
-        initial='auto',
-        label=_('Refund automatically?'),
-        choices=(
-            ('auto', _('Automatically refund charge with Stripe')),
-            ('manual', _('Do not send refund instruction to Stripe, only mark as refunded in pretix'))
-        ),
-        widget=forms.RadioSelect,
-    )
 
 
 class StripeSettingsHolder(BasePaymentProvider):
@@ -236,6 +223,12 @@ class StripeMethod(BasePaymentProvider):
         return self.settings.get('_enabled', as_type=bool) and self.settings.get('method_{}'.format(self.method),
                                                                                  as_type=bool)
 
+    def payment_refund_supported(self, payment: OrderPayment) -> bool:
+        return True
+
+    def payment_partial_refund_supported(self, payment: OrderPayment) -> bool:
+        return True
+
     def payment_prepare(self, request, payment):
         return self.checkout_prepare(request, None)
 
@@ -396,44 +389,19 @@ class StripeMethod(BasePaymentProvider):
         }
         return template.render(ctx)
 
-    def _refund_form(self, request):
-        return RefundForm(data=request.POST if request.method == "POST" else None)
-
-    def order_control_refund_render(self, order, request) -> str:
-        template = get_template('pretixplugins/stripe/control_refund.html')
-        ctx = {
-            'request': request,
-            'form': self._refund_form(request),
-        }
-        return template.render(ctx)
-
-    def order_control_refund_perform(self, request, order) -> "bool|str":
+    def execute_refund(self, refund: OrderRefund):
         self._init_api()
 
-        f = self._refund_form(request)
-        if not f.is_valid():
-            messages.error(request, _('Your input was invalid, please try again.'))
-            return
-        elif f.cleaned_data.get('auto_refund') == 'manual':
-            order = mark_order_refunded(order, user=request.user)
-            order.payment_manual = True
-            order.save()
-            return
-
-        if order.payment_info:
-            payment_info = json.loads(order.payment_info)
-        else:
-            payment_info = None
+        payment_info = refund.payment.info_data
 
         if not payment_info:
-            mark_order_refunded(order, user=request.user)
-            messages.warning(request, _('We were unable to transfer the money back automatically. '
-                                        'Please get in touch with the customer and transfer it back manually.'))
-            return
+            raise PaymentException(_('No payment information found.'))
 
         try:
             ch = stripe.Charge.retrieve(payment_info['id'], **self.api_kwargs)
-            ch.refunds.create()
+            ch.refunds.create(
+                amount=self._get_amount(refund),
+            )
             ch.refresh()
         except (stripe.error.InvalidRequestError, stripe.error.AuthenticationError, stripe.error.APIConnectionError) \
                 as e:
@@ -443,17 +411,13 @@ class StripeMethod(BasePaymentProvider):
             else:
                 err = {'message': str(e)}
                 logger.exception('Stripe error: %s' % str(e))
-            messages.error(request, _('We had trouble communicating with Stripe. Please try again and contact '
-                                      'support if the problem persists.'))
+            raise PaymentException(_('We had trouble communicating with Stripe. Please try again and contact '
+                                     'support if the problem persists.'))
+        except stripe.error.StripeError as err:
             logger.error('Stripe error: %s' % str(err))
-        except stripe.error.StripeError:
-            mark_order_refunded(order, user=request.user)
-            messages.warning(request, _('We were unable to transfer the money back automatically. '
-                                        'Please get in touch with the customer and transfer it back manually.'))
+            raise PaymentException(_('Stripe returned an error'))
         else:
-            order = mark_order_refunded(order, user=request.user)
-            order.payment_info = str(ch)
-            order.save()
+            refund.done()
 
     def execute_payment(self, request: HttpRequest, payment: OrderPayment):
         self._init_api()

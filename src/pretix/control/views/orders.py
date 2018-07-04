@@ -2,6 +2,7 @@ import logging
 import mimetypes
 import os
 from datetime import timedelta
+from decimal import Decimal, DecimalException
 
 import pytz
 import vat_moss.id
@@ -12,6 +13,7 @@ from django.core.urlresolvers import reverse
 from django.db.models import Count
 from django.http import FileResponse, Http404, HttpResponseNotAllowed
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import formats
 from django.utils.formats import date_format
 from django.utils.functional import cached_property
 from django.utils.timezone import now
@@ -28,7 +30,7 @@ from pretix.base.models import (
     generate_position_secret, generate_secret,
 )
 from pretix.base.models.event import SubEvent
-from pretix.base.models.orders import OrderFee, OrderPayment
+from pretix.base.models.orders import OrderFee, OrderPayment, OrderRefund
 from pretix.base.models.tax import EU_COUNTRIES
 from pretix.base.payment import PaymentException
 from pretix.base.services.export import export
@@ -40,10 +42,11 @@ from pretix.base.services.locking import LockTimeoutException
 from pretix.base.services.mail import SendMailException, render_mail
 from pretix.base.services.orders import (
     OrderChangeManager, OrderError, cancel_order, extend_order,
-    mark_order_expired,
+    mark_order_expired, mark_order_refunded,
 )
 from pretix.base.services.stats import order_overview
 from pretix.base.signals import register_data_exporters
+from pretix.base.templatetags.money import money_filter
 from pretix.base.views.async import AsyncAction
 from pretix.base.views.mixins import OrderQuestionsViewMixin
 from pretix.control.forms.filter import EventOrderFilterForm
@@ -138,6 +141,7 @@ class OrderDetail(OrderView):
         ctx['event'] = self.request.event
         ctx['payment_provider'] = self.payment_provider
         ctx['payments'] = self.order.payments.order_by('-created')
+        ctx['refunds'] = self.order.refunds.select_related('payment').order_by('-created')
         for p in ctx['payments']:
             if p.payment_provider:
                 p.html_info = (p.payment_provider.payment_control_render(self.request, p) or "").strip()
@@ -261,7 +265,7 @@ class OrderPaymentConfirm(OrderView):
 
     def post(self, *args, **kwargs):
         if not self.mark_paid_form.is_valid():
-            return render(self.request, 'pretixcontrol/order/pay.html', {
+            return render(self.request, 'pretixcontrol/order/pay_complete.html', {
                 'form': self.mark_paid_form,
                 'order': self.order,
             })
@@ -281,13 +285,13 @@ class OrderPaymentConfirm(OrderView):
         return redirect(self.get_order_url())
 
     def get(self, *args, **kwargs):
-        return render(self.request, 'pretixcontrol/order/pay.html', {
+        return render(self.request, 'pretixcontrol/order/pay_complete.html', {
             'form': self.mark_paid_form,
             'order': self.order,
         })
 
 
-class OrderRefund(OrderView):
+class OrderRefundView(OrderView):
     permission = 'can_change_orders'
 
     @cached_property
@@ -306,9 +310,154 @@ class OrderRefund(OrderView):
         )
 
     def post(self, *args, **kwargs):
-        if not self.start_form.is_valid():
-            return self.get(*args, **kwargs)
-        return redirect(self.get_order_url())
+        if self.start_form.is_valid():
+            payments = self.order.payments.filter(
+                state=OrderPayment.PAYMENT_STATE_CONFIRMED
+            )
+            for p in payments:
+                p.full_refund_possible = p.payment_provider.payment_refund_supported(p)
+                p.partial_refund_possible = p.payment_provider.payment_partial_refund_supported(p)
+                p.propose_refund = Decimal('0.00')
+                p.available_amount = p.amount - p.refunded_amount
+
+            unused_payments = set(payments)
+
+            # Algorithm to choose which payments are to be refunded to create the least hassle
+            if self.start_form.cleaned_data.get('mode') == 'full':
+                to_refund = full_refund = self.order.total - self.order.pending_sum
+            else:
+                to_refund = full_refund = self.start_form.cleaned_data.get('partial_amount')
+
+            while to_refund and unused_payments:
+                bigger = sorted([p for p in unused_payments if p.available_amount > to_refund],
+                                key=lambda p: p.available_amount)
+                same = [p for p in unused_payments if p.available_amount == to_refund]
+                smaller = sorted([p for p in unused_payments if p.available_amount < to_refund],
+                                 key=lambda p: p.available_amount,
+                                 reverse=True)
+                if same:
+                    for payment in same:
+                        if payment.full_refund_possible or payment.partial_refund_possible:
+                            payment.propose_refund = payment.available_amount
+                            to_refund -= payment.available_amount
+                            unused_payments.remove(payment)
+                            break
+                elif bigger:
+                    for payment in bigger:
+                        if payment.partial_refund_possible:
+                            payment.propose_refund = to_refund
+                            to_refund -= to_refund
+                            unused_payments.remove(payment)
+                            break
+                elif smaller:
+                    for payment in smaller:
+                        if payment.full_refund_possible or payment.partial_refund_possible:
+                            payment.propose_refund = payment.available_amount
+                            to_refund -= payment.available_amount
+                            unused_payments.remove(payment)
+                            break
+
+            if 'perform' in self.request.POST:
+                refund_selected = Decimal('0.00')
+                refunds = []
+
+                manual_value = self.request.POST.get('refund-manual')
+                manual_value = formats.sanitize_separators(manual_value)
+                try:
+                    manual_value = Decimal(manual_value)
+                except (DecimalException, TypeError) as e:
+                    messages.error(self.request, _('You entered an invalid number.'))
+                else:
+                    refund_selected += manual_value
+                    if manual_value:
+                        refunds.append(OrderRefund(
+                            order=self.order,
+                            payment=None,
+                            source=OrderRefund.REFUND_SOURCE_ADMIN,
+                            state=OrderRefund.REFUND_STATE_CREATED,
+                            amount=manual_value,
+                            provider=p.provider
+                        ))
+
+                for p in payments:
+                    value = self.request.POST.get('refund-{}'.format(p.pk))
+                    value = formats.sanitize_separators(value)
+                    try:
+                        value = Decimal(value)
+                    except (DecimalException, TypeError) as e:
+                        messages.error(self.request, _('You entered an invalid number.'))
+                    else:
+                        if value > p.available_amount:
+                            messages.error(self.request, _('You can not refund more than the amount of a '
+                                                           'payment that is not yet refunded.'))
+                            break
+                        elif value != p.amount and not p.partial_refund_possible:
+                            messages.error(self.request, _('You selected a partial refund for a payment method that '
+                                                           'only supports full refunds.'))
+                            break
+                        elif (p.partial_refund_possible or p.full_refund_possible) and value > 0:
+                            refund_selected += value
+                            refunds.append(OrderRefund(
+                                order=self.order,
+                                payment=p,
+                                source=OrderRefund.REFUND_SOURCE_ADMIN,
+                                state=OrderRefund.REFUND_STATE_CREATED,
+                                amount=value,
+                                provider=p.provider
+                            ))
+
+                redirect_back = False
+                if refund_selected == full_refund:
+                    for r in refunds:
+                        r.save()
+                        if r.payment:
+                            try:
+                                r.payment_provider.execute_refund(r)
+                            except PaymentException as e:
+                                r.state = OrderRefund.REFUND_STATE_FAILED
+                                r.save()
+                                messages.error(self.request, _('One of the refunds failed to be processed. You should '
+                                                               'retry to refund in a different way. The error message '
+                                                               'was: {}').format(str(e)))
+                            else:
+                                if r.state == OrderRefund.REFUND_STATE_DONE:
+                                    messages.success(self.request, _('A refund of {} has been processed '
+                                                                     'automatically.').format(
+                                        money_filter(r.amount, self.request.event.currency)
+                                    ))
+                                    redirect_back = True
+                                elif r.state == OrderRefund.REFUND_STATE_CREATED:
+                                    messages.info(self.request, _('A refund of {} has been saved, but not yet '
+                                                                  'fully executed. You can mark it as complete '
+                                                                  'below.').format(
+                                        money_filter(r.amount, self.request.event.currency)
+                                    ))
+                                    redirect_back = True
+
+                    # TODO: Log actions
+                    if self.start_form.cleaned_data.get('action') == 'mark_refunded':
+                        mark_order_refunded(self.order, user=self.request.user)
+                    elif self.start_form.cleaned_data.get('action') == 'mark_pending':
+                        self.order.status = Order.STATUS_PENDING
+                        self.order.set_expires(
+                            now(),
+                            self.order.event.subevents.filter(id__in=self.order.positions.values_list('subevent_id', flat=True))
+                        )
+                        self.order.save()
+
+                    if redirect_back:
+                        return redirect(self.get_order_url())
+                else:
+                    messages.error(self.request, _('The refunds you selected do not match the selected total refund '
+                                                   'amount.'))
+
+            return render(self.request, 'pretixcontrol/order/refund_choose.html', {
+                'payments': payments,
+                'remainder': to_refund,
+                'order': self.order,
+                'start_form': self.start_form
+            })
+        return self.get(*args, **kwargs)
 
     def get(self, *args, **kwargs):
         return render(self.request, 'pretixcontrol/order/refund_start.html', {

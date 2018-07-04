@@ -17,7 +17,9 @@ from django.utils.translation import pgettext_lazy, ugettext_lazy as _
 from i18nfield.forms import I18nFormField, I18nTextarea
 from i18nfield.strings import LazyI18nString
 
-from pretix.base.models import CartPosition, Event, Order, OrderPayment, Quota
+from pretix.base.models import (
+    CartPosition, Event, Order, OrderPayment, OrderRefund, Quota,
+)
 from pretix.base.reldate import RelativeDateField, RelativeDateWrapper
 from pretix.base.settings import SettingsSandbox
 from pretix.base.signals import register_payment_providers
@@ -552,47 +554,29 @@ class BasePaymentProvider:
         """
         return _('Payment provider: %s' % self.verbose_name)
 
-    def order_control_refund_render(self, order: Order, request: HttpRequest=None) -> str:
+    def payment_refund_supported(self, payment: OrderPayment) -> bool:
         """
-        Will be called if the event administrator clicks an order's 'refund' button.
-        This can be used to display information *before* the order is being refunded.
-
-        It should return HTML code which should be displayed to the user. It should
-        contain information about to which extend the money will be refunded
-        automatically.
-
-        :param order: The order object
-        :param request: The HTTP request
-
-        .. versionchanged:: 1.6
-
-           The parameter ``request`` has been added.
+        Will be called to check if the provider supports automatical refunding for this
+        payment.
         """
-        return '<div class="alert alert-warning">%s</div>' % _('The money can not be automatically refunded, '
-                                                               'please transfer the money back manually.')
+        return False
 
-    def order_control_refund_perform(self, request: HttpRequest, order: Order) -> Union[bool, str]:
+    def payment_partial_refund_supported(self, payment: OrderPayment) -> bool:
         """
-        Will be called if the event administrator confirms the refund.
-
-        This should transfer the money back (if possible). You can return the URL the
-        user should be redirected to if you need special behavior or None to continue
-        with default behavior.
-
-        On failure, you should use Django's message framework to display an error message
-        to the user.
-
-        The default implementation sets the Order's state to refunded and shows a success
-        message.
-
-        :param request: The HTTP request
-        :param order: The order object
+        Will be called to check if the provider supports automatical partial refunding for this
+        payment.
         """
-        from pretix.base.services.orders import mark_order_refunded
+        return False
 
-        mark_order_refunded(order, user=request.user)
-        messages.success(request, _('The order has been marked as refunded. Please transfer the money '
-                                    'back to the buyer manually.'))
+    def execute_refund(self, refund: OrderRefund):
+        """
+        Will be called to execute an refund. Note that refunds have an amount property and can be partial.
+
+        This should transfer the money back (if possible).
+        On success, you should call ``refund.done()``.
+        On failure, you should raise a PaymentException.
+        """
+        raise PaymentException(_('Automatic refunds are not supported by this payment provider.'))
 
     def shred_payment_info(self, order: Order):
         """

@@ -11,7 +11,7 @@ import dateutil
 import pytz
 from django.conf import settings
 from django.db import models
-from django.db.models import F, Sum
+from django.db.models import F, Max, Sum
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
 from django.urls import reverse
@@ -204,13 +204,17 @@ class Order(LoggedModel):
 
     @property
     def pending_sum(self):
+        total = self.total
+        if self.status in (Order.STATUS_REFUNDED, Order.STATUS_CANCELED):
+            total = 0
         payment_sum = self.payments.filter(
             state__in=(OrderPayment.PAYMENT_STATE_CONFIRMED, OrderPayment.PAYMENT_STATE_REFUNDED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         refund_sum = self.refunds.filter(
-            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)
+            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_TRANSIT,
+                       OrderRefund.REFUND_STATE_CREATED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
-        return self.total - payment_sum + refund_sum
+        return total - payment_sum + refund_sum
 
     @property
     def full_code(self):
@@ -760,6 +764,7 @@ class OrderPayment(models.Model):
         (PAYMENT_STATE_FAILED, pgettext_lazy('payment_state', 'failed')),
         (PAYMENT_STATE_REFUNDED, pgettext_lazy('payment_state', 'refunded')),
     )
+    local_id = models.PositiveIntegerField()
     state = models.CharField(
         max_length=190, choices=PAYMENT_STATES
     )
@@ -798,7 +803,7 @@ class OrderPayment(models.Model):
 
     @property
     def info_data(self):
-        return json.loads(self.info)
+        return json.loads(self.info) if self.info else '{}'
 
     @info_data.setter
     def info_data(self, d):
@@ -839,7 +844,8 @@ class OrderPayment(models.Model):
             state__in=(self.PAYMENT_STATE_CONFIRMED, self.PAYMENT_STATE_REFUNDED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         refund_sum = self.order.refunds.filter(
-            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_APPROVED, OrderRefund.REFUND_STATE_DONE)
+            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_TRANSIT,
+                       OrderRefund.REFUND_STATE_CREATED)
         ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
         if payment_sum - refund_sum < self.order.total:
             return
@@ -903,6 +909,22 @@ class OrderPayment(models.Model):
                 except SendMailException:
                     logger.exception('Order paid email could not be sent')
 
+    @property
+    def refunded_amount(self):
+        return self.refunds.filter(
+            state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_TRANSIT,
+                       OrderRefund.REFUND_STATE_CREATED)
+        ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+
+    @property
+    def full_id(self):
+        return '{}-P-{}'.format(self.order.code, self.local_id)
+
+    def save(self, *args, **kwargs):
+        if not self.local_id:
+            self.local_id = (self.order.payments.aggregate(m=Max('local_id'))['m'] or 0) + 1
+        super().save(*args, **kwargs)
+
 
 class OrderRefund(models.Model):
     """
@@ -926,23 +948,25 @@ class OrderRefund(models.Model):
     :param info_data: Provider-specific meta information
     :type info_data: dict
     """
-    REFUND_STATE_REQUESTED = 'requested'
-    REFUND_STATE_APPROVED = 'approved'
+    # REFUND_STATE_REQUESTED = 'requested'
+    # REFUND_STATE_APPROVED = 'approved'
     REFUND_STATE_EXTERNAL = 'external'
     REFUND_STATE_TRANSIT = 'transit'
     REFUND_STATE_DONE = 'done'
-    REFUND_STATE_REJECTED = 'rejected'
+    # REFUND_STATE_REJECTED = 'rejected'
     REFUND_STATE_CANCELED = 'canceled'
     REFUND_STATE_CREATED = 'created'
+    REFUND_STATE_FAILED = 'failed'
 
     REFUND_STATES = (
-        (REFUND_STATE_REQUESTED, pgettext_lazy('refund_state', 'requested')),
-        (REFUND_STATE_APPROVED, pgettext_lazy('refund_state', 'approved')),
-        (REFUND_STATE_EXTERNAL, pgettext_lazy('refund_state', 'processed externally')),
+        # (REFUND_STATE_REQUESTED, pgettext_lazy('refund_state', 'requested')),
+        # (REFUND_STATE_APPROVED, pgettext_lazy('refund_state', 'approved')),
+        (REFUND_STATE_EXTERNAL, pgettext_lazy('refund_state', 'started externally')),
         (REFUND_STATE_CREATED, pgettext_lazy('refund_state', 'created')),
         (REFUND_STATE_TRANSIT, pgettext_lazy('refund_state', 'in transit')),
         (REFUND_STATE_DONE, pgettext_lazy('refund_state', 'done')),
-        (REFUND_STATE_REJECTED, pgettext_lazy('refund_state', 'rejected')),
+        (REFUND_STATE_FAILED, pgettext_lazy('refund_state', 'failed')),
+        # (REFUND_STATE_REJECTED, pgettext_lazy('refund_state', 'rejected')),
         (REFUND_STATE_CANCELED, pgettext_lazy('refund_state', 'canceled')),
     )
 
@@ -956,6 +980,7 @@ class OrderRefund(models.Model):
         (REFUND_SOURCE_EXTERNAL, pgettext_lazy('refund_source', 'External')),
     )
 
+    local_id = models.PositiveIntegerField()
     state = models.CharField(
         max_length=190, choices=REFUND_STATES
     )
@@ -996,11 +1021,38 @@ class OrderRefund(models.Model):
 
     @property
     def info_data(self):
-        return json.loads(self.info)
+        return json.loads(self.info) if self.info else '{}'
 
     @info_data.setter
     def info_data(self, d):
         self.info = json.dumps(d)
+
+    @cached_property
+    def payment_provider(self):
+        return self.order.event.get_payment_providers().get(self.provider)
+
+    def done(self, user=None, auth=None):
+        """
+        Marks the refund as complete.
+
+        :param user: The user that performed the change
+        """
+        self.state = self.REFUND_STATE_DONE
+        self.execution_date = self.execution_date or now()
+        self.save()
+
+        if self.payment and self.payment.refunded_amount >= self.payment.amount:
+            self.payment.state = OrderPayment.PAYMENT_STATE_REFUNDED
+            self.payment.save(update_fields=['state'])
+
+    @property
+    def full_id(self):
+        return '{}-R-{}'.format(self.order.code, self.local_id)
+
+    def save(self, *args, **kwargs):
+        if not self.local_id:
+            self.local_id = (self.order.refunds.aggregate(m=Max('local_id'))['m'] or 0) + 1
+        super().save(*args, **kwargs)
 
 
 class OrderFee(models.Model):

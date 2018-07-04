@@ -124,7 +124,7 @@ def extend_order(order: Order, new_date: datetime, force: bool=False, user: User
 
 
 @transaction.atomic
-def mark_order_refunded(order, user=None, api_token=None):
+def mark_order_refunded(order, user=None, auth=None, api_token=None):
     """
     Mark this order as refunded. This sets the payment status and returns the order object.
     :param order: The order to change
@@ -138,7 +138,7 @@ def mark_order_refunded(order, user=None, api_token=None):
         order.status = Order.STATUS_REFUNDED
         order.save()
 
-    order.log_action('pretix.event.order.refunded', user=user, api_token=api_token)
+    order.log_action('pretix.event.order.refunded', user=user, auth=auth or api_token)
     i = order.invoices.filter(is_cancellation=False).last()
     if i:
         generate_cancellation(i)
