@@ -249,6 +249,44 @@ class OrderPaymentCancel(OrderView):
         })
 
 
+class OrderRefundCancel(OrderView):
+    permission = 'can_change_orders'
+
+    @cached_property
+    def refund(self):
+        return get_object_or_404(self.order.refunds, pk=self.kwargs['refund'])
+
+    def post(self, *args, **kwargs):
+        self.refund.done()
+        # TODO: Log action
+        messages.success(self.request, _('The refund has been canceled.'))
+        return redirect(self.get_order_url())
+
+    def get(self, *args, **kwargs):
+        return render(self.request, 'pretixcontrol/order/refund_cancel.html', {
+            'order': self.order,
+        })
+
+
+class OrderRefundDone(OrderView):
+    permission = 'can_change_orders'
+
+    @cached_property
+    def refund(self):
+        return get_object_or_404(self.order.refunds, pk=self.kwargs['refund'])
+
+    def post(self, *args, **kwargs):
+        self.refund.done()
+        # TODO: Log action
+        messages.success(self.request, _('The refund has been marked as done.'))
+        return redirect(self.get_order_url())
+
+    def get(self, *args, **kwargs):
+        return render(self.request, 'pretixcontrol/order/refund_done.html', {
+            'order': self.order,
+        })
+
+
 class OrderPaymentConfirm(OrderView):
     permission = 'can_change_orders'
 
@@ -278,10 +316,10 @@ class OrderPaymentConfirm(OrderView):
         except PaymentException as e:
             messages.error(self.request, str(e))
         except SendMailException:
-            messages.warning(self.request, _('The order has been marked as paid, but we were unable to send a '
+            messages.warning(self.request, _('The payment has been marked as complete, but we were unable to send a '
                                              'confirmation mail.'))
         else:
-            messages.success(self.request, _('The order has been marked as paid.'))
+            messages.success(self.request, _('The payment has been marked as complete.'))
         return redirect(self.get_order_url())
 
     def get(self, *args, **kwargs):
@@ -497,10 +535,10 @@ class OrderTransition(OrderView):
             except PaymentException as e:
                 messages.error(self.request, str(e))
             except SendMailException:
-                messages.warning(self.request, _('The payment has been marked as complete, but we were unable to send a '
+                messages.warning(self.request, _('The order has been marked as paid, but we were unable to send a '
                                                  'confirmation mail.'))
             else:
-                messages.success(self.request, _('The payment has been marked as complete.'))
+                messages.success(self.request, _('The order has been marked as paid.'))
         elif self.order.cancel_allowed() and to == 'c':
             cancel_order(self.order, user=self.request.user, send_mail=self.request.POST.get("send_email") == "on")
             messages.success(self.request, _('The order has been canceled.'))
