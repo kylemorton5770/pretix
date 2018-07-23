@@ -179,7 +179,7 @@ def charge_webhook(event, event_json, charge_id, rso):
     prov = StripeCC(event)
     prov._init_api()
     try:
-        charge = stripe.Charge.retrieve(charge_id, **prov.api_kwargs)
+        charge = stripe.Charge.retrieve(charge_id, expand=['dispute'], **prov.api_kwargs)
     except stripe.error.StripeError:
         logger.exception('Stripe error on webhook. Event data: %s' % str(event_json))
         return HttpResponse('Charge not found', status=500)
@@ -232,6 +232,12 @@ def charge_webhook(event, event_json, charge_id, rso):
                 payment.create_external_refund(
                     amount=prov._amount_to_decimal(r['amount']),
                     info=str(r)
+                )
+        if charge['dispute']:
+            if charge['dispute']['status'] != 'won' and charge['dispute']['id'] not in known_refunds:
+                payment.create_external_refund(
+                    amount=prov._amount_to_decimal(charge['dispute']['amount']),
+                    info=str(charge['dispute'])
                 )
     elif payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED):
         if charge['status'] == 'succeeded':
