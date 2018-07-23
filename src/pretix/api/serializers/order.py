@@ -451,6 +451,9 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
     def create(self, validated_data):
         fees_data = validated_data.pop('fees') if 'fees' in validated_data else []
         positions_data = validated_data.pop('positions') if 'positions' in validated_data else []
+        payment_provider = validated_data.pop('payment_provider')
+        payment_info = validated_data.pop('payment_info', '{}')
+
         if 'invoice_address' in validated_data:
             ia = InvoiceAddress(**validated_data.pop('invoice_address'))
         else:
@@ -511,27 +514,26 @@ class OrderCreateSerializer(I18nAwareModelSerializer):
             order.save()
 
             if order.total == Decimal('0.00') and validated_data.get('status') != Order.STATUS_PAID:
-                order.payment_provider = 'free'
                 order.status = Order.STATUS_PAID
                 order.save()
                 order.payments.create(
                     amount=order.total, provider='free', state=OrderPayment.PAYMENT_STATE_CONFIRMED
                 )
-            elif order.payment_provider == "free" and order.total != Decimal('0.00'):
+            elif payment_provider == "free" and order.total != Decimal('0.00'):
                 raise ValidationError('You cannot use the "free" payment provider for non-free orders.')
             elif validated_data.get('status') == Order.STATUS_PAID:
                 order.payments.create(
                     amount=order.total,
-                    provider=validated_data.get('payment_provider', 'manual'),
-                    info=validated_data.get('payment_info', '{}'),
+                    provider=payment_provider,
+                    info=payment_info,
                     payment_date=now(),
                     state=OrderPayment.PAYMENT_STATE_CONFIRMED
                 )
-            elif validated_data.get('payment_provider'):
+            elif payment_provider:
                 order.payments.create(
                     amount=order.total,
-                    provider=validated_data.get('payment_provider', 'manual'),
-                    info=validated_data.get('payment_info', '{}'),
+                    provider=payment_provider,
+                    info=payment_info,
                     state=OrderPayment.PAYMENT_STATE_CREATED
                 )
 

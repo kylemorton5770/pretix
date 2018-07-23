@@ -9,8 +9,8 @@ from django_countries.fields import Country
 from tests.base import SoupTest
 
 from pretix.base.models import (
-    Event, InvoiceAddress, Item, Order, OrderPosition, Organizer, Question,
-    QuestionAnswer, Quota, Team, User,
+    Event, InvoiceAddress, Item, Order, OrderPayment, OrderPosition, Organizer,
+    Question, QuestionAnswer, Quota, Team, User,
 )
 from pretix.base.services.invoices import (
     generate_cancellation, generate_invoice,
@@ -34,6 +34,9 @@ def env():
         status=Order.STATUS_PENDING,
         datetime=now(), expires=now() + timedelta(days=10),
         total=14, locale='en'
+    )
+    o.payments.create(
+        amount=o.total, provider='banktransfer', state=OrderPayment.PAYMENT_STATE_PENDING
     )
     ticket = Item.objects.create(event=event, name='Early-bird ticket',
                                  category=None, default_price=23,
