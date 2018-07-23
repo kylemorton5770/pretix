@@ -156,7 +156,7 @@ def webhook(request, *args, **kwargs):
 
     try:
         rso = ReferencedStripeObject.objects.select_related('order', 'order__event').get(reference=objid)
-        return func(rso.order.event, event_json, objid, rso.payment)
+        return func(rso.order.event, event_json, objid, rso)
     except ReferencedStripeObject.DoesNotExist:
         if hasattr(request, 'event'):
             return func(request.event, event_json, objid, None)
@@ -164,7 +164,18 @@ def webhook(request, *args, **kwargs):
             return HttpResponse("Unable to detect event", status=200)
 
 
-def charge_webhook(event, event_json, charge_id, payment):
+SOURCE_TYPES = {
+    'sofort': 'stripe_sofort',
+    'three_d_secure': 'stripe',
+    'card': 'stripe',
+    'giropay': 'stripe_giropay',
+    'ideal': 'stripe_ideal',
+    'alipay': 'stripe_alipay',
+    'bancontact': 'stripe_bancontact',
+}
+
+
+def charge_webhook(event, event_json, charge_id, rso):
     prov = StripeCC(event)
     prov._init_api()
     try:
@@ -180,14 +191,32 @@ def charge_webhook(event, event_json, charge_id, payment):
     if int(metadata['event']) != event.pk:
         return HttpResponse('Not interested in this event', status=200)
 
-    if payment:
-        order = payment.order
+    if rso and rso.payment:
+        order = rso.payment.order
+        payment = rso.payment
+    elif rso:
+        order = rso.order
+        payment = None
     else:
-        # TODO: Backwards compatibility
         try:
-            order = event.orders.get(id=metadata['order'], payment_provider__startswith='stripe')
+            order = event.orders.get(id=metadata['order'])
         except Order.DoesNotExist:
             return HttpResponse('Order not found', status=200)
+        payment = None
+
+    if not payment:
+        payment = order.payments.filter(
+            info__icontains=charge['id'],
+            provider__startswith='stripe',
+            amount=prov._amount_to_decimal(charge['amount']),
+        ).last()
+    if not payment:
+        payment = order.payments.create(
+            state=OrderPayment.PAYMENT_STATE_CREATED,
+            provider=SOURCE_TYPES.get(charge['source'].get('type', charge['source'].get('object', 'card')), 'stripe'),
+            amount=prov._amount_to_decimal(charge['amount']),
+            info=str(charge),
+        )
 
     if payment.provider != prov.identifier:
         prov = payment.payment_provider
@@ -204,7 +233,7 @@ def charge_webhook(event, event_json, charge_id, payment):
                     amount=prov._amount_to_decimal(r['amount']),
                     info=str(r)
                 )
-    elif payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_PENDING):
+    elif payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED):
         if charge['status'] == 'succeeded':
             # TODO: Log
             try:
@@ -222,7 +251,7 @@ def charge_webhook(event, event_json, charge_id, payment):
     return HttpResponse(status=200)
 
 
-def source_webhook(event, event_json, source_id, payment):
+def source_webhook(event, event_json, source_id, rso):
     prov = StripeCC(event)
     prov._init_api()
     try:
@@ -239,11 +268,32 @@ def source_webhook(event, event_json, source_id, payment):
         return HttpResponse('Not interested in this event', status=200)
 
     with transaction.atomic():
-        if payment:
-            order = payment.order
+        if rso and rso.payment:
+            order = rso.payment.order
+            payment = rso.payment
+        elif rso:
+            order = rso.order
+            payment = None
         else:
-            # TODO: backwards compat
-            pass
+            try:
+                order = event.orders.get(id=metadata['order'])
+            except Order.DoesNotExist:
+                return HttpResponse('Order not found', status=200)
+            payment = None
+
+        if not payment:
+            payment = order.payments.filter(
+                info__icontains=src['id'],
+                provider__startswith='stripe',
+                amount=prov._amount_to_decimal(src['amount']) if src['amount'] is not None else order.total,
+            ).last()
+        if not payment:
+            payment = order.payments.create(
+                state=OrderPayment.PAYMENT_STATE_CREATED,
+                provider=SOURCE_TYPES.get(src['type'], 'stripe'),
+                amount=prov._amount_to_decimal(src['amount']) if src['amount'] is not None else order.total,
+                info=str(src),
+            )
 
         if payment.provider != prov.identifier:
             prov = payment.payment_provider

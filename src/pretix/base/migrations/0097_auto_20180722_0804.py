@@ -11,7 +11,7 @@ def create_payments(apps, schema_editor):
     OrderRefund = apps.get_model('pretixbase', 'OrderRefund')  # noqa
     payments = []
     refunds = []
-    for o in Order.objects.iterator():
+    for o in Order.objects.filter(payments__isnull=True).iterator():
         if o.status == 'n' or o.status == 'e':
             payments.append(OrderPayment(
                 local_id=1,
