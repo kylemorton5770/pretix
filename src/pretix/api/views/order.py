@@ -422,7 +422,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         mark_refunded = request.data.get('mark_refunded', False)
 
         if payment.state != OrderPayment.PAYMENT_STATE_CONFIRMED:
-            return Response({'detail': 'Invalid state of payment'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'detail': 'Invalid state of payment.'}, status=status.HTTP_400_BAD_REQUEST)
 
         full_refund_possible = payment.payment_provider.payment_refund_supported(payment)
         partial_refund_possible = payment.payment_provider.payment_partial_refund_supported(payment)

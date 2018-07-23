@@ -9,6 +9,8 @@ from django.core import mail as djmail
 from django.utils.timezone import now
 from django_countries.fields import Country
 from pytz import UTC
+from stripe.error import APIConnectionError
+from tests.plugins.stripe.test_provider import MockedCharge
 
 from pretix.base.models import InvoiceAddress, Order, OrderPosition, Question
 from pretix.base.models.orders import (
@@ -59,6 +61,8 @@ def quota(event, item):
 @pytest.fixture
 def order(event, item, taxrule, question):
     testtime = datetime.datetime(2017, 12, 1, 10, 0, 0, tzinfo=UTC)
+    event.plugins += ",pretix.plugins.stripe"
+    event.save()
 
     with mock.patch('django.utils.timezone.now') as mock_now:
         mock_now.return_value = testtime
@@ -70,13 +74,13 @@ def order(event, item, taxrule, question):
             total=23, locale='en'
         )
         p1 = o.payments.create(
-            provider='stripe_cc',
+            provider='stripe',
             state='refunded',
             amount=Decimal('23.00'),
             payment_date=testtime,
         )
         o.refunds.create(
-            provider='stripe_cc',
+            provider='stripe',
             state='done',
             source='admin',
             amount=Decimal('23.00'),
@@ -138,7 +142,7 @@ TEST_PAYMENTS_RES = [
         "local_id": 1,
         "created": "2017-12-01T10:00:00Z",
         "payment_date": "2017-12-01T10:00:00Z",
-        "provider": "stripe_cc",
+        "provider": "stripe",
         "state": "refunded",
         "amount": "23.00"
     },
@@ -158,7 +162,7 @@ TEST_REFUNDS_RES = [
         "source": "admin",
         "created": "2017-12-01T10:00:00Z",
         "execution_date": "2017-12-01T10:00:00Z",
-        "provider": "stripe_cc",
+        "provider": "stripe",
         "state": "done",
         "amount": "23.00"
     },
@@ -326,7 +330,7 @@ def test_payment_cancel(token_client, organizer, event, order):
 
 
 @pytest.mark.django_db
-def test_payment_refund(token_client, organizer, event, order):
+def test_payment_refund_fail(token_client, organizer, event, order, monkeypatch):
     order.payments.last().confirm()
     resp = token_client.post('/api/v1/organizers/{}/events/{}/orders/{}/payments/2/refund/'.format(
         organizer.slug, event.slug, order.code
@@ -362,6 +366,82 @@ def test_payment_refund(token_client, organizer, event, order):
     })
     assert resp.status_code == 400
     assert resp.data == {'amount': ['Full refund not available for this payment method.']}
+
+    resp = token_client.post('/api/v1/organizers/{}/events/{}/orders/{}/payments/1/refund/'.format(
+        organizer.slug, event.slug, order.code
+    ), format='json', data={
+        'amount': '23.00',
+        'mark_refunded': False
+    })
+    assert resp.status_code == 400
+    assert resp.data == {'detail': 'Invalid state of payment.'}
+
+
+@pytest.mark.django_db
+def test_payment_refund_success(token_client, organizer, event, order, monkeypatch):
+    def charge_retr(*args, **kwargs):
+        def refund_create(amount):
+            pass
+
+        c = MockedCharge()
+        c.refunds.create = refund_create
+        return c
+
+    p1 = order.payments.create(
+        provider='stripe',
+        state='confirmed',
+        amount=Decimal('23.00'),
+        payment_date=order.datetime,
+        info=json.dumps({
+            'id': 'ch_123345345'
+        })
+    )
+    monkeypatch.setattr("stripe.Charge.retrieve", charge_retr)
+    resp = token_client.post('/api/v1/organizers/{}/events/{}/orders/{}/payments/{}/refund/'.format(
+        organizer.slug, event.slug, order.code, p1.local_id
+    ), format='json', data={
+        'amount': '23.00',
+        'mark_refunded': False,
+    })
+    assert resp.status_code == 200
+    r = order.refunds.get(local_id=resp.data['local_id'])
+    assert r.provider == "stripe"
+    assert r.state == OrderRefund.REFUND_STATE_DONE
+    assert r.source == OrderRefund.REFUND_SOURCE_ADMIN
+
+
+@pytest.mark.django_db
+def test_payment_refund_unavailable(token_client, organizer, event, order, monkeypatch):
+    def charge_retr(*args, **kwargs):
+        def refund_create(amount):
+            raise APIConnectionError(message='Foo')
+
+        c = MockedCharge()
+        c.refunds.create = refund_create
+        return c
+
+    p1 = order.payments.create(
+        provider='stripe',
+        state='confirmed',
+        amount=Decimal('23.00'),
+        payment_date=order.datetime,
+        info=json.dumps({
+            'id': 'ch_123345345'
+        })
+    )
+    monkeypatch.setattr("stripe.Charge.retrieve", charge_retr)
+    resp = token_client.post('/api/v1/organizers/{}/events/{}/orders/{}/payments/{}/refund/'.format(
+        organizer.slug, event.slug, order.code, p1.local_id
+    ), format='json', data={
+        'amount': '23.00',
+        'mark_refunded': False,
+    })
+    assert resp.status_code == 400
+    assert resp.data == {'detail': 'External error: We had trouble communicating with Stripe. Please try again and contact support if the problem persists.'}
+    r = order.refunds.last()
+    assert r.provider == "stripe"
+    assert r.state == OrderRefund.REFUND_STATE_FAILED
+    assert r.source == OrderRefund.REFUND_SOURCE_ADMIN
 
 
 @pytest.mark.django_db

@@ -1180,7 +1180,7 @@ class OrderFee(models.Model):
     :type order: Order
     :param fee_type: The type of the fee, currently ``payment``, ``shipping``, ``service``, ``giftcard``, or ``other``.
     :type fee_type: str
-    :param description: A human-redable description of the fee
+    :param description: A human-readable description of the fee
     :type description: str
     :param internal_type: An internal string to group fees by, e.g. the identifier string of a payment provider
     :type internal_type: str

@@ -113,7 +113,7 @@ last_modified                         datetime                   Last modificati
 .. versionchanged:: 2.0
 
    The ``order.payment_date`` and ``order.payment_provider`` attributes have been deprecated in favor of the new
-   ``payments`` and ``refunds`` subresources, but will still be served and removed in 2.2.
+   nested ``payments`` and ``refunds`` resources, but will still be served and removed in 2.2.
 
 .. _order-position-resource:
 
@@ -1236,8 +1236,8 @@ Order payment endpoints
    :param code: The ``code`` field of the order to fetch
    :param local_id: The ``local_id`` field of the payment to fetch
    :statuscode 200: no error
-       :statuscode 401: Authentication failure
-       :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order or payment does not exist.
 
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/payments/(local_id)/confirm/
@@ -1311,9 +1311,9 @@ Order payment endpoints
    :param code: The ``code`` field of the order to fetch
    :param local_id: The ``local_id`` field of the payment to modify
    :statuscode 200: no error
-       :statuscode 400: Invalid request or payment state
-       :statuscode 401: Authentication failure
-       :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
+   :statuscode 400: Invalid request or payment state
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order or payment does not exist.
 
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/payments/(local_id)/refund/

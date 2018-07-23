@@ -54,7 +54,7 @@ This has the following advantages:
 
 * The system can now detect orders that are over- or underpaid, independent of the payment providers in use.
 
-* Therefore, we can now allow partial payments, partial refunds, and chaning paid orders, and automatically detect
+* Therefore, we can now allow partial payments, partial refunds, and changing paid orders, and automatically detect
   the cases listed above and notify the user.
 
 Payment providers now interact with those payment and refund objects more than with orders.
@@ -94,7 +94,7 @@ Payment processing
   ``BasePaymentProvider.payment_control_render(request, payment)`` that is passed an ``OrderPayment``
   object instead of an ``Order``.
 
-* There's no need to manually deal with overpayments or duplicate payments anymore, just setting the ``OrderPayment``
+* There's no need to manually deal with excess payments or duplicate payments anymore, just setting the ``OrderPayment``
   methods to the correct state will do the job.
 
 Creating refunds

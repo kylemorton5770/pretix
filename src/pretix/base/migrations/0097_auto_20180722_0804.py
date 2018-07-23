@@ -79,6 +79,14 @@ def create_payments(apps, schema_editor):
         OrderRefund.objects.bulk_create(refunds)
 
 
+def notifications(apps, schema_editor):
+    NotificationSetting = apps.get_model('pretixbase', 'NotificationSetting')
+    for n in NotificationSetting.objects.filter(action_type='pretix.event.action_required'):
+        n.pk = None
+        n.action_type = 'pretix.event.order.refund.created.externally'
+        n.save()
+
+
 class Migration(migrations.Migration):
     dependencies = [
         ('pretixbase', '0096_auto_20180722_0801'),
@@ -86,6 +94,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(create_payments, migrations.RunPython.noop),
+        migrations.RunPython(notifications, migrations.RunPython.noop),
         migrations.RemoveField(
             model_name='order',
             name='payment_date',

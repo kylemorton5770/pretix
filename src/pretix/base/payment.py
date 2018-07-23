@@ -551,14 +551,14 @@ class BasePaymentProvider:
 
     def payment_refund_supported(self, payment: OrderPayment) -> bool:
         """
-        Will be called to check if the provider supports automatical refunding for this
+        Will be called to check if the provider supports automatic refunding for this
         payment.
         """
         return False
 
     def payment_partial_refund_supported(self, payment: OrderPayment) -> bool:
         """
-        Will be called to check if the provider supports automatical partial refunding for this
+        Will be called to check if the provider supports automatic partial refunding for this
         payment.
         """
         return False
