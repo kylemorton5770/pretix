@@ -6,7 +6,7 @@ import pytest
 from django.utils.timezone import now
 
 from pretix.base.models import (
-    Event, Order, Organizer, RequiredAction, Team, User,
+    Event, Order, OrderPayment, OrderRefund, Organizer, Team, User,
 )
 from pretix.plugins.paypal.models import ReferencedPayPalObject
 
@@ -27,7 +27,12 @@ def env():
         status=Order.STATUS_PAID,
         datetime=now(), expires=now() + timedelta(days=10),
         total=Decimal('13.37'),
-        payment_info=json.dumps({
+    )
+    o1.payments.create(
+        amount=o1.total,
+        provider='paypal',
+        state=OrderPayment.PAYMENT_STATE_CONFIRMED,
+        info=json.dumps({
             "id": "PAY-5YK922393D847794YKER7MUI",
             "create_time": "2013-02-19T22:01:53Z",
             "update_time": "2013-02-19T22:01:55Z",
@@ -191,6 +196,7 @@ def test_webhook_global(env, client, monkeypatch):
     order = env[1]
     order.status = Order.STATUS_PENDING
     order.save()
+    order.payments.update(state=OrderPayment.PAYMENT_STATE_PENDING)
 
     charge = get_test_charge(env[1])
     monkeypatch.setattr("paypalrestsdk.Sale.find", lambda *args: charge)
@@ -231,6 +237,7 @@ def test_webhook_mark_paid(env, client, monkeypatch):
     order = env[1]
     order.status = Order.STATUS_PENDING
     order.save()
+    order.payments.update(state=OrderPayment.PAYMENT_STATE_PENDING)
 
     charge = get_test_charge(env[1])
     monkeypatch.setattr("paypalrestsdk.Sale.find", lambda *args: charge)
@@ -309,13 +316,12 @@ def test_webhook_refund1(env, client, monkeypatch):
     order.refresh_from_db()
     assert order.status == Order.STATUS_PAID
 
-    ra = RequiredAction.objects.get(action_type="pretix.plugins.paypal.refund")
-    client.login(username='dummy@dummy.dummy', password='dummy')
-    client.post('/control/event/dummy/dummy/paypal/refund/{}/'.format(ra.pk))
-
-    order = env[1]
-    order.refresh_from_db()
-    assert order.status == Order.STATUS_REFUNDED
+    r = order.refunds.first()
+    assert r.provider == 'paypal'
+    assert r.amount == order.total
+    assert r.payment == order.payments.first()
+    assert r.state == OrderRefund.REFUND_STATE_EXTERNAL
+    assert r.source == OrderRefund.REFUND_SOURCE_EXTERNAL
 
 
 @pytest.mark.django_db
@@ -356,10 +362,9 @@ def test_webhook_refund2(env, client, monkeypatch):
     order.refresh_from_db()
     assert order.status == Order.STATUS_PAID
 
-    ra = RequiredAction.objects.get(action_type="pretix.plugins.paypal.refund")
-    client.login(username='dummy@dummy.dummy', password='dummy')
-    client.post('/control/event/dummy/dummy/paypal/refund/{}/'.format(ra.pk))
-
-    order = env[1]
-    order.refresh_from_db()
-    assert order.status == Order.STATUS_REFUNDED
+    r = order.refunds.first()
+    assert r.provider == 'paypal'
+    assert r.amount == order.total
+    assert r.payment == order.payments.first()
+    assert r.state == OrderRefund.REFUND_STATE_EXTERNAL
+    assert r.source == OrderRefund.REFUND_SOURCE_EXTERNAL

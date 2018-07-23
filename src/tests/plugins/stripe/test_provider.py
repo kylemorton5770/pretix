@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from django.test import RequestFactory
 from django.utils.timezone import now
-from stripe import APIConnectionError, CardError, StripeError
+from stripe.error import APIConnectionError, CardError, StripeError
 
 from pretix.base.models import Event, Order, OrderRefund, Organizer
 from pretix.base.payment import PaymentException
@@ -39,11 +39,16 @@ def factory():
     return RequestFactory()
 
 
+class MockedRefunds():
+    pass
+
+
 class MockedCharge():
     def __init__(self):
         self.status = ''
         self.paid = False
         self.id = 'ch_123345345'
+        self.refunds = MockedRefunds()
 
     def refresh(self):
         pass
@@ -204,7 +209,6 @@ def test_refund_success(env, factory, monkeypatch):
             pass
 
         c = MockedCharge()
-        c.refunds = MockedCharge()
         c.refunds.create = refund_create
         return c
 
@@ -234,7 +238,6 @@ def test_refund_unavailable(env, factory, monkeypatch):
             raise APIConnectionError(message='Foo')
 
         c = MockedCharge()
-        c.refunds = object()
         c.refunds.create = refund_create
         return c
 
@@ -250,6 +253,7 @@ def test_refund_unavailable(env, factory, monkeypatch):
     refund = order.refunds.create(
         provider='stripe_cc', amount=order.total, payment=p
     )
-    prov.execute_refund(refund)
+    with pytest.raises(PaymentException):
+        prov.execute_refund(refund)
     refund.refresh_from_db()
     assert refund.state != OrderRefund.REFUND_STATE_DONE
