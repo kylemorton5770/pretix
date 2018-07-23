@@ -584,3 +584,27 @@ class InvoiceSerializer(I18nAwareModelSerializer):
                   'introductory_text', 'additional_text', 'payment_provider_text', 'footer_text', 'lines',
                   'foreign_currency_display', 'foreign_currency_rate', 'foreign_currency_rate_date',
                   'internal_reference')
+
+
+class OrderRefundCreateSerializer(I18nAwareModelSerializer):
+    payment = serializers.IntegerField(required=False, allow_null=True)
+    provider = serializers.CharField(required=True, allow_null=False, allow_blank=False)
+    info = CompatibleJSONField(required=False)
+
+    class Meta:
+        model = OrderRefund
+        fields = ('state', 'source', 'amount', 'payment', 'execution_date', 'provider', 'info')
+
+    def create(self, validated_data):
+        pid = validated_data.pop('payment', None)
+        if pid:
+            try:
+                p = self.context['order'].payments.get(local_id=pid)
+            except OrderPayment.DoesNotExist:
+                raise ValidationError('Unknown payment ID.')
+        else:
+            p = None
+
+        order = OrderRefund(order=self.context['order'], payment=p, **validated_data)
+        order.save()
+        return order

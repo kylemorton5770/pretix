@@ -16,6 +16,7 @@ from pretix.base.payment import BasePaymentProvider
 class BankTransfer(BasePaymentProvider):
     identifier = 'banktransfer'
     verbose_name = _('Bank transfer')
+    abort_pending_allowed = True
 
     @staticmethod
     def form_field(**kwargs):
@@ -64,6 +65,9 @@ class BankTransfer(BasePaymentProvider):
         return template.render(ctx)
 
     def checkout_prepare(self, request, total):
+        return True
+
+    def payment_prepare(self, request: HttpRequest, payment: OrderPayment):
         return True
 
     def payment_is_valid_session(self, request):

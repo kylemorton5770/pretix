@@ -21,7 +21,8 @@ from rest_framework.response import Response
 from pretix.api.models import OAuthAccessToken
 from pretix.api.serializers.order import (
     InvoiceSerializer, OrderCreateSerializer, OrderPaymentSerializer,
-    OrderPositionSerializer, OrderRefundSerializer, OrderSerializer,
+    OrderPositionSerializer, OrderRefundCreateSerializer,
+    OrderRefundSerializer, OrderSerializer,
 )
 from pretix.base.models import (
     Invoice, Order, OrderPayment, OrderPosition, OrderRefund, Quota,
@@ -430,8 +431,9 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         if amount <= 0:
             return Response({'amount': ['Invalid refund amount.']}, status=status.HTTP_400_BAD_REQUEST)
         if amount > available_amount:
-            return Response({'amount': ['Invalid refund amount, only {} are available to refund.'.format(available_amount)]},
-                            status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {'amount': ['Invalid refund amount, only {} are available to refund.'.format(available_amount)]},
+                status=status.HTTP_400_BAD_REQUEST)
         if amount != payment.amount and not partial_refund_possible:
             return Response({'amount': ['Partial refund not available for this payment method.']},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -460,7 +462,8 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
             }, user=self.request.user if self.request.user.is_authenticated else None, auth=self.request.auth)
             if payment.order.pending_sum > 0:
                 if mark_refunded:
-                    mark_order_refunded(payment.order, user=self.request.user if self.request.user.is_authenticated else None,
+                    mark_order_refunded(payment.order,
+                                        user=self.request.user if self.request.user.is_authenticated else None,
                                         auth=self.request.auth)
                 else:
                     payment.order.status = Order.STATUS_PENDING
@@ -489,7 +492,7 @@ class PaymentViewSet(viewsets.ReadOnlyModelViewSet):
         return self.retrieve(request, [], **kwargs)
 
 
-class RefundViewSet(viewsets.ReadOnlyModelViewSet):
+class RefundViewSet(CreateModelMixin, viewsets.ReadOnlyModelViewSet):
     serializer_class = OrderRefundSerializer
     queryset = OrderRefund.objects.none()
     permission = 'can_view_orders'
@@ -547,6 +550,34 @@ class RefundViewSet(viewsets.ReadOnlyModelViewSet):
 
         refund.done(user=self.request.user if self.request.user.is_authenticated else None, auth=self.request.auth)
         return self.retrieve(request, [], **kwargs)
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx['order'] = get_object_or_404(Order, code=self.kwargs['order'], event=self.request.event)
+        return ctx
+
+    def create(self, request, *args, **kwargs):
+        serializer = OrderRefundCreateSerializer(data=request.data, context=self.get_serializer_context())
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():
+            self.perform_create(serializer)
+            r = serializer.instance
+            serializer = OrderRefundSerializer(r, context=serializer.context)
+
+            r.order.log_action(
+                'pretix.event.order.refund.created', {
+                    'local_id': r.local_id,
+                    'provider': r.provider,
+                },
+                user=request.user if request.user.is_authenticated else None,
+                auth=request.auth
+            )
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_create(self, serializer):
+        serializer.save()
 
 
 class InvoiceFilter(FilterSet):

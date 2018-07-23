@@ -2043,3 +2043,71 @@ def test_order_create_paid_generate_invoice(token_client, organizer, event, item
     assert p.provider == "banktransfer"
     assert p.amount == o.total
     assert p.state == "confirmed"
+
+
+REFUND_CREATE_PAYLOAD = {
+    "state": "created",
+    "provider": "manual",
+    "amount": "23.00",
+    "source": "admin",
+    "payment": 2,
+    "info": {
+        "foo": "bar",
+    }
+}
+
+
+@pytest.mark.django_db
+def test_refund_create(token_client, organizer, event, order):
+    res = copy.deepcopy(REFUND_CREATE_PAYLOAD)
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/refunds/'.format(
+            organizer.slug, event.slug, order.code
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    r = order.refunds.get(local_id=resp.data['local_id'])
+    assert r.provider == "manual"
+    assert r.amount == Decimal("23.00")
+    assert r.state == "created"
+    assert r.source == "admin"
+    assert r.info_data == {"foo": "bar"}
+    assert r.payment.local_id == 2
+
+
+@pytest.mark.django_db
+def test_refund_optional_fields(token_client, organizer, event, order):
+    res = copy.deepcopy(REFUND_CREATE_PAYLOAD)
+    del res['info']
+    del res['payment']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/refunds/'.format(
+            organizer.slug, event.slug, order.code
+        ), format='json', data=res
+    )
+    assert resp.status_code == 201
+    r = order.refunds.get(local_id=resp.data['local_id'])
+    assert r.provider == "manual"
+    assert r.amount == Decimal("23.00")
+    assert r.state == "created"
+    assert r.source == "admin"
+
+    del res['state']
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/refunds/'.format(
+            organizer.slug, event.slug, order.code
+        ), format='json', data=res
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_refund_create_invalid_payment(token_client, organizer, event, order):
+    res = copy.deepcopy(REFUND_CREATE_PAYLOAD)
+    res['payment'] = 7
+    resp = token_client.post(
+        '/api/v1/organizers/{}/events/{}/orders/{}/refunds/'.format(
+            organizer.slug, event.slug, order.code
+        ), format='json', data=res
+    )
+    assert resp.status_code == 400

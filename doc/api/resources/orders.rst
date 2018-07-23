@@ -1452,6 +1452,60 @@ Order refund endpoints
    :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
    :statuscode 404: The requested order or refund does not exist.
 
+.. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/refunds/
+
+   Creates a refund manually.
+
+   .. warning:: We recommend to only use this endpoint for refunds with payment provider ``manual``. This endpoint also
+                does not check for mismatching amounts etc. Be careful!
+
+   **Example request**:
+
+   .. sourcecode:: http
+
+      POST /api/v1/organizers/bigevents/events/sampleconf/orders/ABC12/refunds/ HTTP/1.1
+      Host: pretix.eu
+      Accept: application/json, text/javascript
+      Content-Type: application/json
+
+      {
+        "state": "created",
+        "source": "admin",
+        "amount": "23.00",
+        "payment": 1,
+        "execution_date": null,
+        "provider": "manual"
+      }
+
+   **Example response**:
+
+   .. sourcecode:: http
+
+      HTTP/1.1 201 Created
+      Vary: Accept
+      Content-Type: application/json
+
+      {
+        "local_id": 1,
+        "state": "created",
+        "source": "admin",
+        "amount": "23.00",
+        "payment": 1,
+        "created": "2017-12-01T10:00:00Z",
+        "execution_date": null,
+        "provider": "manual"
+      }
+
+   :query integer page: The page number in case of a multi-page result set, default is 1
+   :param organizer: The ``slug`` field of the organizer to fetch
+   :param event: The ``slug`` field of the event to fetch
+   :param order: The ``code`` field of the order to fetch
+   :statuscode 200: no error
+   :statuscode 400: Invalid data supplied
+   :statuscode 401: Authentication failure
+   :statuscode 403: The requested organizer/event does not exist **or** you have no permission to view this resource.
+   :statuscode 404: The requested order does not exist.
+
 .. http:post:: /api/v1/organizers/(organizer)/events/(event)/orders/(code)/refunds/(local_id)/done/
 
    Marks a refund as completed. Only allowed in states ``transit`` and ``created``.
