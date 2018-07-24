@@ -316,7 +316,6 @@ def source_webhook(event, event_json, source_id, rso):
                 logger.exception('Webhook error')
 
         elif src.status == 'failed':
-            # TODO: Log
             payment.info = str(src)
             payment.state = OrderPayment.PAYMENT_STATE_FAILED
             payment.save()

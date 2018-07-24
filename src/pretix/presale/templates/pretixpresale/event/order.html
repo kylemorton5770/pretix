@@ -58,14 +58,19 @@
                 {% if last_payment %}
                     {{ last_payment_info }}
                     {% if can_pay %}
-                        <a href="{% eventurl event "presale:event.order.pay.change" secret=order.secret order=order.code %}"
-                                class="btn btn-default">
-                            {% trans "Re-try payment or choose another payment method" %}</a>
+                        <div class="text-right">
+                            <a href="{% eventurl event "presale:event.order.pay.change" secret=order.secret order=order.code %}"
+                                    class="btn btn-default">
+                                {% trans "Re-try payment or choose another payment method" %}
+                            </a>
+                        </div>
                     {% endif %}
                 {% else %}
                     {% if can_pay %}
-                        <a href="{% eventurl event "presale:event.order.pay.change" secret=order.secret order=order.code %}"
-                                class="btn btn-primary btn-lg">{% trans "Pay now" %}</a>
+                        <div class="text-right">
+                            <a href="{% eventurl event "presale:event.order.pay.change" secret=order.secret order=order.code %}"
+                                    class="btn btn-primary btn-lg">{% trans "Pay now" %}</a>
+                        </div>
                     {% endif %}
                 {% endif %}
 

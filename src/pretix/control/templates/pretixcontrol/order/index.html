@@ -72,7 +72,7 @@
 
     {% if overpaid > 0 %}
         <form action="{% url "control:event.order.refunds.start" event=request.event.slug organizer=request.event.organizer.slug code=order.code %}"
-            method="post">
+                method="post">
             {% csrf_token %}
             <input type="hidden" name="start-action" value="do_nothing">
             <input type="hidden" name="start-mode" value="partial">
@@ -397,7 +397,16 @@
                                     {% for p in payments %}
                                         <tr>
                                             <td>{{ p.full_id }}</td>
-                                            <td>{{ p.created|date:"SHORT_DATETIME_FORMAT" }}</td>
+                                            <td>
+                                                {% if p.migrated %}
+                                                    <span class="label label-default" data-toggle="tooltip"
+                                                    title="{% trans "This payment was created with an older version of pretix, therefore accurate data might not be available." %}">
+                                                        {% trans "MIGRATED" %}
+                                                    </span>
+                                                {% else %}
+                                                    {{ p.created|date:"SHORT_DATETIME_FORMAT" }}
+                                                {% endif %}
+                                            </td>
                                             <td>{{ p.payment_date|date:"SHORT_DATETIME_FORMAT" }}</td>
                                             <td>
                                                 {{ p.payment_provider.verbose_name }}

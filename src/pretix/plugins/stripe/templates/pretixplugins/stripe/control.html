@@ -5,7 +5,7 @@
         <dl class="dl-horizontal">
             <dt>{% trans "Charge ID" %}</dt>
             <dd>{{ payment_info.id }}</dd>
-            {% if payment_info.source.type == "card" or payment_info.source.type == "three_d_secure" %}
+            {% if payment_info.source.card %}
                 <dt>{% trans "Card type" %}</dt>
                 <dd>{{ payment_info.source.card.brand }}</dd>
                 <dt>{% trans "Card number" %}</dt>
