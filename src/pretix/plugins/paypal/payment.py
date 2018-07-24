@@ -22,18 +22,6 @@ from pretix.plugins.paypal.models import ReferencedPayPalObject
 logger = logging.getLogger('pretix.plugins.paypal')
 
 
-class RefundForm(forms.Form):
-    auto_refund = forms.ChoiceField(
-        initial='auto',
-        label=_('Refund automatically?'),
-        choices=(
-            ('auto', _('Automatically refund charge with PayPal')),
-            ('manual', _('Do not send refund instruction to PayPal, only mark as refunded in pretix'))
-        ),
-        widget=forms.RadioSelect,
-    )
-
-
 class Paypal(BasePaymentProvider):
     identifier = 'paypal'
     verbose_name = _('PayPal')
@@ -293,9 +281,6 @@ class Paypal(BasePaymentProvider):
         ctx = {'request': request, 'event': self.event, 'settings': self.settings,
                'payment_info': payment.info_data, 'order': payment.order}
         return template.render(ctx)
-
-    def _refund_form(self, request):
-        return RefundForm(data=request.POST if request.method == "POST" else None)
 
     def payment_partial_refund_supported(self, payment: OrderPayment):
         return True
