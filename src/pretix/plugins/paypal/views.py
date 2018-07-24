@@ -1,9 +1,11 @@
 import json
 import logging
+from decimal import Decimal
 
 import paypalrestsdk
 from django.contrib import messages
 from django.core import signing
+from django.db.models import Sum
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.utils.translation import ugettext_lazy as _
@@ -11,7 +13,7 @@ from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from pretix.base.models import Order, OrderPayment, Quota
+from pretix.base.models import Order, OrderPayment, OrderRefund, Quota
 from pretix.base.payment import PaymentException
 from pretix.multidomain.urlreverse import eventreverse
 from pretix.plugins.paypal.models import ReferencedPayPalObject
@@ -155,9 +157,43 @@ def webhook(request, *args, **kwargs):
     payment.order.log_action('pretix.plugins.paypal.event', data=event_json)
 
     if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED and sale['state'] in ('partially_refunded', 'refunded'):
-        payment.create_external_refund(
-            amount=payment.amount,
-        )
+        if event_json['resource_type'] == 'refund':
+            try:
+                refund = paypalrestsdk.Refund.find(event_json['resource']['id'])
+            except:
+                logger.exception('PayPal error on webhook. Event data: %s' % str(event_json))
+                return HttpResponse('Refund not found', status=500)
+
+            known_refunds = {r.info_data.get('id'): r for r in payment.refunds.all()}
+            if refund['id'] not in known_refunds:
+                payment.create_external_refund(
+                    amount=abs(Decimal(refund['amount']['total'])),
+                    info=json.dumps(refund.to_dict() if not isinstance(refund, dict) else refund)
+                )
+            elif known_refunds.get(refund['id']).state in (
+                    OrderRefund.REFUND_STATE_CREATED, OrderRefund.REFUND_STATE_TRANSIT) and refund['state'] == 'completed':
+                known_refunds.get(refund['id']).done()
+
+            if 'total_refunded_amount' in refund:
+                known_sum = payment.refunds.filter(
+                    state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_TRANSIT,
+                               OrderRefund.REFUND_STATE_CREATED, OrderRefund.REFUND_SOURCE_EXTERNAL)
+                ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+                total_refunded_amount = Decimal(refund['total_refunded_amount']['value'])
+                if known_sum < total_refunded_amount:
+                    payment.create_external_refund(
+                        amount=total_refunded_amount - known_sum
+                    )
+        elif sale['state'] == 'refunded':
+            known_sum = payment.refunds.filter(
+                state__in=(OrderRefund.REFUND_STATE_DONE, OrderRefund.REFUND_STATE_TRANSIT,
+                           OrderRefund.REFUND_STATE_CREATED, OrderRefund.REFUND_SOURCE_EXTERNAL)
+            ).aggregate(s=Sum('amount'))['s'] or Decimal('0.00')
+
+            if known_sum < payment.amount:
+                payment.create_external_refund(
+                    amount=payment.amount - known_sum
+                )
     elif payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED) and sale['state'] == 'completed':
         try:
             payment.confirm()

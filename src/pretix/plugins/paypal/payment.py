@@ -306,24 +306,25 @@ class Paypal(BasePaymentProvider):
     def execute_refund(self, refund: OrderRefund):
         self.init_api()
 
+        sale = None
         for res in refund.payment.info_data['transactions'][0]['related_resources']:
             for k, v in res.items():
                 if k == 'sale':
                     sale = paypalrestsdk.Sale.find(v['id'])
                     break
 
-        refund = sale.refund({
+        pp_refund = sale.refund({
             "amount": {
                 "total": self.format_price(refund.amount),
                 "currency": refund.order.event.currency
             }
         })
-        if not refund.success():
+        if not pp_refund.success():
             raise PaymentException(_('Refunding the amount via PayPal failed: {}').format(refund.error))
         else:
             sale = paypalrestsdk.Payment.find(refund.payment.info_data['id'])
             refund.payment.info = json.dumps(sale.to_dict())
-            refund.info = json.dumps(sale.to_dict())
+            refund.info = json.dumps(pp_refund.to_dict())
             refund.done()
 
     def payment_prepare(self, request, payment_obj):

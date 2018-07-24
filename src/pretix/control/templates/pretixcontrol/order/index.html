@@ -493,7 +493,7 @@
                                                                 title="{% trans "Cancel transfer" %}">
                                                             <span class="fa fa-times"></span>
                                                         </a>
-                                                        <a href="{% url "control:event.order.refunds.retry" event=request.event.slug organizer=request.event.organizer.slug code=order.code refund=r.pk %}"
+                                                        <a href="{% url "control:event.order.refunds.done" event=request.event.slug organizer=request.event.organizer.slug code=order.code refund=r.pk %}"
                                                                 class="btn btn-primary btn-xs" data-toggle="tooltip"
                                                                 title="{% trans "Confirm as done" %}">
                                                             <span class="fa fa-check"></span>
