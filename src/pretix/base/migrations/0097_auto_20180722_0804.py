@@ -20,6 +20,7 @@ def create_payments(apps, schema_editor):
                 order=o,
                 provider=o.payment_provider,
                 info=o.payment_info,
+                migrated=True,
                 fee=o.fees.filter(fee_type="payment", internal_type=o.payment_provider).first(),
             ))
             pass
@@ -32,6 +33,7 @@ def create_payments(apps, schema_editor):
                 provider=o.payment_provider,
                 payment_date=o.payment_date,
                 info=o.payment_info,
+                migrated=True,
                 fee=o.fees.filter(fee_type="payment", internal_type=o.payment_provider).first(),
             ))
         elif o.status == 'r':
@@ -43,6 +45,7 @@ def create_payments(apps, schema_editor):
                 provider=o.payment_provider,
                 payment_date=o.payment_date,
                 info=o.payment_info,
+                migrated=True,
                 fee=o.fees.filter(fee_type="payment", internal_type=o.payment_provider).first(),
             )
             refunds.append(OrderRefund(
@@ -64,6 +67,7 @@ def create_payments(apps, schema_editor):
                 provider=o.payment_provider,
                 payment_date=o.payment_date,
                 info=o.payment_info,
+                migrated=True,
                 fee=o.fees.filter(fee_type="payment", internal_type=o.payment_provider).first(),
             ))
 

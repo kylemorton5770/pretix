@@ -24,6 +24,7 @@ class Migration(migrations.Migration):
                 ('payment_date', models.DateTimeField(blank=True, null=True)),
                 ('provider', models.CharField(blank=True, max_length=255, null=True, verbose_name='Payment provider')),
                 ('info', models.TextField(blank=True, null=True, verbose_name='Payment information')),
+                ('migrated', models.BooleanField(default=False)),
             ],
             options={
                 'ordering': ('local_id',),

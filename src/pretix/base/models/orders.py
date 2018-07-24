@@ -831,6 +831,7 @@ class OrderPayment(models.Model):
         'OrderFee',
         null=True, blank=True, related_name='payments'
     )
+    migrated = models.BooleanField(default=False)
 
     class Meta:
         ordering = ('local_id',)
