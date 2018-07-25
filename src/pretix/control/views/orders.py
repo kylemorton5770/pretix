@@ -455,7 +455,7 @@ class OrderRefundView(OrderView):
                 refunds = []
 
                 is_valid = True
-                manual_value = self.request.POST.get('refund-manual', '0')
+                manual_value = self.request.POST.get('refund-manual', '0') or '0'
                 manual_value = formats.sanitize_separators(manual_value)
                 try:
                     manual_value = Decimal(manual_value)
@@ -478,7 +478,7 @@ class OrderRefundView(OrderView):
                             provider='manual'
                         ))
 
-                offsetting_value = self.request.POST.get('refund-offsetting', '0')
+                offsetting_value = self.request.POST.get('refund-offsetting', '0') or '0'
                 offsetting_value = formats.sanitize_separators(offsetting_value)
                 try:
                     offsetting_value = Decimal(offsetting_value)
@@ -508,7 +508,7 @@ class OrderRefundView(OrderView):
                             ))
 
                 for p in payments:
-                    value = self.request.POST.get('refund-{}'.format(p.pk), '0')
+                    value = self.request.POST.get('refund-{}'.format(p.pk), '0') or '0'
                     value = formats.sanitize_separators(value)
                     try:
                         value = Decimal(value)
