@@ -94,9 +94,10 @@ class InvoiceExporter(BaseExporter):
                          (k, v.verbose_name) for k, v in self.event.get_payment_providers().items()
                      ],
                      required=False,
-                     help_text=_('Only include invoices for orders that are currently set to this payment provider. '
-                                 'Note that this might include some invoices of other payment providers an order has '
-                                 'payment attempts with multiple providers.')
+                     help_text=_('Only include invoices for orders that have at least one payment attempt '
+                                 'with this payment provider. '
+                                 'Note that this might include some invoices of orders which in the end have been '
+                                 'fully or partially paid with a different provider.')
                  )),
             ]
         )
