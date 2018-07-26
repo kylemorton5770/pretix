@@ -1,4 +1,5 @@
 import datetime
+from decimal import Decimal
 
 import pytest
 from django.utils.timezone import now
@@ -36,6 +37,20 @@ def order(item):
                              total=13, code='DUMMY', email='dummy@dummy.test',
                              datetime=now())
     OrderPosition.objects.create(order=o, item=item, price=13)
+    p1 = o.payments.create(
+        provider='stripe',
+        state='refunded',
+        amount=Decimal('23.00'),
+        payment_date=o.datetime,
+    )
+    o.refunds.create(
+        provider='stripe',
+        state='done',
+        source='admin',
+        amount=Decimal('23.00'),
+        execution_date=o.datetime,
+        payment=p1,
+    )
     return o
 
 
@@ -131,6 +146,12 @@ def logged_in_client(client, event):
     ('/control/event/{orga}/{event}/orders/{order_code}/comment', 405),
     ('/control/event/{orga}/{event}/orders/{order_code}/change', 200),
     ('/control/event/{orga}/{event}/orders/{order_code}/locale', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/payments/1/cancel', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/payments/1/confirm', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refund', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/cancel', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/process', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/done', 200),
     ('/control/event/{orga}/{event}/orders/{order_code}/', 200),
     ('/control/event/{orga}/{event}/orders/overview/', 200),
     ('/control/event/{orga}/{event}/orders/export/', 200),

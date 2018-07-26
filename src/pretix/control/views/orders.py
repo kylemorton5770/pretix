@@ -244,7 +244,7 @@ class OrderPaymentCancel(OrderView):
                     'local_id': self.payment.local_id,
                     'provider': self.payment.provider,
                 }, user=self.request.user)
-            messages.error(self.request, _('This payment has been canceled.'))
+            messages.success(self.request, _('This payment has been canceled.'))
         else:
             messages.error(self.request, _('This payment can not be canceled at the moment.'))
         return redirect(self.get_order_url())
@@ -273,6 +273,8 @@ class OrderRefundCancel(OrderView):
                     'provider': self.refund.provider,
                 }, user=self.request.user)
             messages.success(self.request, _('The refund has been canceled.'))
+        else:
+            messages.error(self.request, _('This refund can not be canceled at the moment.'))
         if "next" in self.request.GET and is_safe_url(self.request.GET.get("next")):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
@@ -306,6 +308,8 @@ class OrderRefundProcess(OrderView):
                 self.order.save()
 
             messages.success(self.request, _('The refund has been processed.'))
+        else:
+            messages.error(self.request, _('This refund can not be processed at the moment.'))
         if "next" in self.request.GET and is_safe_url(self.request.GET.get("next")):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
@@ -329,7 +333,9 @@ class OrderRefundDone(OrderView):
     def post(self, *args, **kwargs):
         if self.refund.state in (OrderRefund.REFUND_STATE_CREATED, OrderRefund.REFUND_STATE_TRANSIT):
             self.refund.done(user=self.request.user)
-        messages.success(self.request, _('The refund has been marked as done.'))
+            messages.success(self.request, _('The refund has been marked as done.'))
+        else:
+            messages.error(self.request, _('This refund can not be processed at the moment.'))
         if "next" in self.request.GET and is_safe_url(self.request.GET.get("next")):
             return redirect(self.request.GET.get("next"))
         return redirect(self.get_order_url())
@@ -375,6 +381,8 @@ class OrderPaymentConfirm(OrderView):
                                    'confirmation mail.'))
             else:
                 messages.success(self.request, _('The payment has been marked as complete.'))
+        else:
+            messages.error(self.request, _('This payment can not be confirmed at the moment.'))
         return redirect(self.get_order_url())
 
     def get(self, *args, **kwargs):
