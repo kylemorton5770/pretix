@@ -951,12 +951,13 @@ def test_check_vatid_unavailable(client, env):
 
 @pytest.mark.django_db
 def test_cancel_payment(client, env):
-    client.login(email='dummy@dummy.dummy', password='dummy')
-    response = client.post('/control/event/dummy/dummy/orders/FOO/payments/1/cancel', {}, follow=True)
-    assert 'alert-success' in response.rendered_content
     p = env[2].payments.last()
+    client.login(email='dummy@dummy.dummy', password='dummy')
+    response = client.post('/control/event/dummy/dummy/orders/FOO/payments/{}/cancel'.format(p.pk), {}, follow=True)
+    assert 'alert-success' in response.rendered_content
+    p.refresh_from_db()
     assert p.state == OrderPayment.PAYMENT_STATE_CANCELED
-    response = client.post('/control/event/dummy/dummy/orders/FOO/payments/1/cancel', {}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/payments/{}/cancel'.format(p.pk), {}, follow=True)
     assert 'alert-danger' in response.rendered_content
 
 
@@ -970,13 +971,13 @@ def test_cancel_refund(client, env):
         execution_date=now(),
     )
     client.login(email='dummy@dummy.dummy', password='dummy')
-    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/1/cancel', {}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/{}/cancel'.format(r.pk), {}, follow=True)
     assert 'alert-success' in response.rendered_content
     r.refresh_from_db()
     assert r.state == OrderRefund.REFUND_STATE_CANCELED
     r.state = OrderRefund.REFUND_STATE_DONE
     r.save()
-    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/1/cancel', {}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/{}/cancel'.format(r.pk), {}, follow=True)
     assert 'alert-danger' in response.rendered_content
     r.refresh_from_db()
     assert r.state == OrderRefund.REFUND_STATE_DONE
@@ -992,7 +993,7 @@ def test_process_refund(client, env):
         execution_date=now(),
     )
     client.login(email='dummy@dummy.dummy', password='dummy')
-    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/1/process', {}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/{}/process'.format(r.pk), {}, follow=True)
     assert 'alert-success' in response.rendered_content
     r.refresh_from_db()
     assert r.state == OrderRefund.REFUND_STATE_DONE
@@ -1010,7 +1011,7 @@ def test_process_refund_invalid_state(client, env):
         execution_date=now(),
     )
     client.login(email='dummy@dummy.dummy', password='dummy')
-    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/1/process', {}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/{}/process'.format(r.pk), {}, follow=True)
     assert 'alert-danger' in response.rendered_content
     r.refresh_from_db()
     assert r.state == OrderRefund.REFUND_STATE_CANCELED
@@ -1026,7 +1027,8 @@ def test_process_refund_mark_refunded(client, env):
         execution_date=now(),
     )
     client.login(email='dummy@dummy.dummy', password='dummy')
-    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/1/process', {'action': 'r'}, follow=True)
+    response = client.post('/control/event/dummy/dummy/orders/FOO/refunds/{}/process'.format(r.pk), {'action': 'r'},
+                           follow=True)
     assert 'alert-success' in response.rendered_content
     r.refresh_from_db()
     assert r.state == OrderRefund.REFUND_STATE_DONE

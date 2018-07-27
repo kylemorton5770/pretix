@@ -146,12 +146,12 @@ def logged_in_client(client, event):
     ('/control/event/{orga}/{event}/orders/{order_code}/comment', 405),
     ('/control/event/{orga}/{event}/orders/{order_code}/change', 200),
     ('/control/event/{orga}/{event}/orders/{order_code}/locale', 200),
-    ('/control/event/{orga}/{event}/orders/{order_code}/payments/1/cancel', 200),
-    ('/control/event/{orga}/{event}/orders/{order_code}/payments/1/confirm', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/payments/{payment}/cancel', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/payments/{payment}/confirm', 200),
     ('/control/event/{orga}/{event}/orders/{order_code}/refund', 200),
-    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/cancel', 200),
-    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/process', 200),
-    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/1/done', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/{refund}/cancel', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/{refund}/process', 200),
+    ('/control/event/{orga}/{event}/orders/{order_code}/refunds/{refund}/done', 200),
     ('/control/event/{orga}/{event}/orders/{order_code}/', 200),
     ('/control/event/{orga}/{event}/orders/overview/', 200),
     ('/control/event/{orga}/{event}/orders/export/', 200),
@@ -162,6 +162,8 @@ def logged_in_client(client, event):
 ])
 @pytest.mark.django_db
 def test_one_view(logged_in_client, url, expected, event, item, item_category, order, question, quota, voucher):
+    payment = order.payments.first()
+    refund = order.refunds.first()
     url = url.format(
         event=event.slug, orga=event.organizer.slug,
         category=item_category.pk,
@@ -170,6 +172,8 @@ def test_one_view(logged_in_client, url, expected, event, item, item_category, o
         question=question.pk,
         quota=quota.pk,
         voucher=voucher.pk,
+        payment=payment.pk,
+        refund=refund.pk
     )
     response = logged_in_client.get(url)
     assert response.status_code == expected
